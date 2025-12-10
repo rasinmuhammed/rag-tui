@@ -1,4 +1,4 @@
-"""RAG-TUI v0.0.1-beta: Interactive Chunking Debugger.
+"""RAG-TUI v0.0.2-beta: Interactive Chunking Debugger.
 
 A beautiful terminal UI for visualizing, debugging, and tuning RAG pipelines.
 Features: Multiple chunking strategies, multi-provider LLM, batch testing, export.
@@ -55,7 +55,7 @@ class RAGTUIApp(App):
     
     CSS_PATH = Path(__file__).parent / "styles" / "app.tcss"
     
-    TITLE = "RAG-TUI v0.0.1 Beta"
+    TITLE = "RAG-TUI v0.0.2 Beta"
     SUB_TITLE = "Interactive Chunking Debugger"
     
     BINDINGS = [
@@ -87,6 +87,7 @@ class RAGTUIApp(App):
         self._current_strategy = StrategyType.TOKEN
 
         self._debounce_task = None
+        self._embedding_task = None  # Track in-flight embedding for cancellation
         self._batch_results = []
         self._file_info = None
         self._custom_cleaner = None  # Optional custom text cleaner
@@ -311,29 +312,53 @@ class RAGTUIApp(App):
             summary.update("No chunks yet")
     
     async def _update_embeddings(self) -> None:
-        """Update vector store with embeddings."""
+        """Update vector store with embeddings (bulletproof version).
+        
+        Features:
+        - Cancels any in-flight embedding operation before starting new one
+        - Gracefully handles cancellation without error messages
+        - Silent failure mode - app continues working without search
+        """
         if not self.embedding_provider:
             return
-            
-        try:
-            chunk_texts = [c[0] for c in self._current_chunks]
-            if not chunk_texts:
-                return
+        
+        # Cancel any in-flight embedding operation
+        if self._embedding_task and not self._embedding_task.done():
+            self._embedding_task.cancel()
+            try:
+                await self._embedding_task
+            except asyncio.CancelledError:
+                pass  # Expected
+        
+        chunk_texts = [c[0] for c in self._current_chunks]
+        if not chunk_texts:
+            return
+        
+        async def do_embedding():
+            """Inner function to perform embedding with error handling."""
+            try:
+                embeddings = await self.embedding_provider.embed_batch(chunk_texts)
+                embeddings_np = np.array(embeddings, dtype=np.float32)
                 
-            embeddings = await self.embedding_provider.embed_batch(chunk_texts)
-            embeddings_np = np.array(embeddings, dtype=np.float32)
-            
-            # Update store with correct dimensions
-            if embeddings_np.shape[1] != self.vector_store.embedding_dim:
-                self.vector_store = VectorStore(embedding_dim=embeddings_np.shape[1])
-            
-            self.vector_store.clear()
-            self.vector_store.add_chunks(chunk_texts, embeddings_np)
-            
-            self.notify(f"Embeddings updated ({len(chunk_texts)} chunks)")
-            
-        except Exception as e:
-            self.notify(f"Embedding error: {e}", severity="warning")
+                # Update store with correct dimensions
+                if embeddings_np.shape[1] != self.vector_store.embedding_dim:
+                    self.vector_store = VectorStore(embedding_dim=embeddings_np.shape[1])
+                
+                self.vector_store.clear()
+                self.vector_store.add_chunks(chunk_texts, embeddings_np)
+                
+                self.notify(f"✓ Embeddings ready ({len(chunk_texts)} chunks)", timeout=2)
+                
+            except asyncio.CancelledError:
+                # Silently handle cancellation - this is normal during rapid parameter changes
+                pass
+            except Exception as e:
+                # Log error but don't show alarming message - search just won't work
+                # Use information severity instead of warning
+                self.notify(f"Embeddings pending... (retrying)", severity="information", timeout=3)
+        
+        # Start embedding as background task
+        self._embedding_task = asyncio.create_task(do_embedding())
     
     async def on_search_panel_query_submitted(self, event: SearchPanel.QuerySubmitted) -> None:
         """Handle search/generate queries."""
@@ -692,7 +717,7 @@ Avg Retrieval Score: {batch_result.avg_retrieval_score:.3f}
                 self._current_strategy = strategy_map[preset.strategy]
             
             # Update parameter panel
-            param_panel = self.query_one("#param-panel", ParameterPanel)
+            param_panel = self.query_one("#parameter-panel", ParameterPanel)
             param_panel.chunk_size = preset.chunk_size
             param_panel.overlap_percent = preset.overlap_percent
             

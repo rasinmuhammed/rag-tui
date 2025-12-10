@@ -133,16 +133,85 @@ class OllamaProvider(LLMProvider):
         except Exception:
             return False
     
-    async def embed(self, text: str) -> List[float]:
-        response = await self.client.post(
-            f"{self.config.base_url}/api/embeddings",
-            json={"model": self.config.embedding_model, "prompt": text}
-        )
-        response.raise_for_status()
-        return response.json()["embedding"]
+    # Class-level lock to prevent concurrent embedding batches
+    _embedding_lock: asyncio.Lock = None
+    
+    async def embed(self, text: str, max_retries: int = 5) -> List[float]:
+        """Generate embedding with robust retry logic for transient errors.
+        
+        Uses exponential backoff with longer delays to handle Ollama overload.
+        """
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                response = await self.client.post(
+                    f"{self.config.base_url}/api/embeddings",
+                    json={"model": self.config.embedding_model, "prompt": text},
+                    timeout=30.0  # Short timeout per request
+                )
+                response.raise_for_status()
+                return response.json()["embedding"]
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                if e.response.status_code == 500 and attempt < max_retries - 1:
+                    # Ollama overwhelmed - use aggressive exponential backoff
+                    wait_time = min(1.0 * (2 ** attempt), 8.0)  # 1s, 2s, 4s, 8s, 8s
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    wait_time = min(1.0 * (2 ** attempt), 8.0)
+                    await asyncio.sleep(wait_time)
+                else:
+                    raise
+            except asyncio.CancelledError:
+                # Allow cancellation to propagate
+                raise
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                else:
+                    raise
+        
+        raise RuntimeError(f"Embedding failed after {max_retries} attempts: {last_error}")
     
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        return [await self.embed(text) for text in texts]
+        """Generate embeddings with bulletproof error handling.
+        
+        Features:
+        - Global lock prevents concurrent batches from overwhelming Ollama
+        - Sequential processing with delays between requests
+        - Graceful handling of cancellation
+        """
+        # Initialize lock if needed (class-level singleton)
+        if OllamaProvider._embedding_lock is None:
+            OllamaProvider._embedding_lock = asyncio.Lock()
+        
+        async with OllamaProvider._embedding_lock:
+            results = []
+            for i, text in enumerate(texts):
+                try:
+                    # Check for cancellation before each embedding
+                    await asyncio.sleep(0)  # Yield to allow cancellation
+                    
+                    result = await self.embed(text)
+                    results.append(result)
+                    
+                    # Longer delay between requests (200ms) to prevent overload
+                    if i < len(texts) - 1:
+                        await asyncio.sleep(0.2)
+                        
+                except asyncio.CancelledError:
+                    # Clean cancellation - return what we have so far or empty
+                    raise
+                except Exception as e:
+                    # On any error, raise with context
+                    raise RuntimeError(f"Failed to embed chunk {i + 1}/{len(texts)}: {e}")
+            
+            return results
     
     async def generate(self, prompt: str) -> str:
         response = await self.client.post(

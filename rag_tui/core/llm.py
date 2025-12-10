@@ -44,17 +44,42 @@ class OllamaLLM:
         except Exception as e:
             raise RuntimeError(f"Failed to generate embedding: {e}")
     
-    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for multiple texts.
+    async def embed_batch(
+        self,
+        texts: List[str],
+        max_concurrent: int = 3,
+        max_retries: int = 3
+    ) -> List[List[float]]:
+        """Generate embeddings for multiple texts with rate limiting.
         
         Args:
             texts: List of texts to embed
+            max_concurrent: Maximum concurrent requests to Ollama (default: 3)
+            max_retries: Maximum retry attempts per embedding (default: 3)
             
         Returns:
             List of embedding vectors
         """
-        # Generate embeddings concurrently
-        tasks = [self.embed(text) for text in texts]
+        # Use semaphore to limit concurrent requests
+        semaphore = asyncio.Semaphore(max_concurrent)
+        
+        async def embed_with_retry(text: str, idx: int) -> List[float]:
+            """Embed single text with retry logic."""
+            async with semaphore:
+                for attempt in range(max_retries):
+                    try:
+                        return await self.embed(text)
+                    except Exception as e:
+                        if attempt < max_retries - 1:
+                            # Exponential backoff: 0.5s, 1s, 2s
+                            await asyncio.sleep(0.5 * (2 ** attempt))
+                        else:
+                            raise RuntimeError(
+                                f"Failed to embed chunk {idx + 1} after {max_retries} attempts: {e}"
+                            )
+        
+        # Generate embeddings with rate limiting
+        tasks = [embed_with_retry(text, i) for i, text in enumerate(texts)]
         return await asyncio.gather(*tasks)
     
     async def generate(

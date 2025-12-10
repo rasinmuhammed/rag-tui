@@ -8,7 +8,7 @@ from textual.binding import Binding
 
 
 HELP_MARKDOWN = """
-# 🚀 RAG-TUI v0.0.1 Beta
+# 🚀 RAG-TUI v0.0.2 Beta
 
 ## ⌨️ Keyboard Shortcuts
 * **Q**        : Quit application

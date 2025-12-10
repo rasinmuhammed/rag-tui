@@ -236,6 +236,30 @@ class ParameterPanel(Container):
     def chunk_size(self) -> int:
         return self._chunk_size
     
+    @chunk_size.setter
+    def chunk_size(self, value: int) -> None:
+        """Set chunk size and update UI control."""
+        self._chunk_size = value
+        try:
+            control = self.query_one("#chunk-size-control", ParameterControl)
+            control._value = value
+            control._update_input()
+            control._update_bar()
+        except Exception:
+            pass
+    
     @property
     def overlap_percent(self) -> int:
         return self._overlap_percent
+    
+    @overlap_percent.setter
+    def overlap_percent(self, value: int) -> None:
+        """Set overlap percent and update UI control."""
+        self._overlap_percent = value
+        try:
+            control = self.query_one("#overlap-control", ParameterControl)
+            control._value = value
+            control._update_input()
+            control._update_bar()
+        except Exception:
+            pass

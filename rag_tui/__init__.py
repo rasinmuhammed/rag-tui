@@ -17,7 +17,7 @@ Usage:
     rag-tui
 """
 
-__version__ = "0.0.1-beta"
+__version__ = "0.0.2-beta"
 __author__ = "Muhammed Rasin"
 
 __all__ = ["__version__", "__author__"]

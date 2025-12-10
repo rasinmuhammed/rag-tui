@@ -1,4 +1,4 @@
-"""Comprehensive production-level tests for RAG-TUI v0.0.1-beta."""
+"""Comprehensive production-level tests for RAG-TUI v0.0.2-beta."""
 
 import pytest
 import asyncio
@@ -465,7 +465,7 @@ class TestIntegration:
         """Test package version."""
         import rag_tui
         
-        assert rag_tui.__version__ == "0.0.1-beta"
+        assert rag_tui.__version__ == "0.0.2-beta"
         print(f"✅ Version: {rag_tui.__version__}")
     
     def test_vector_store(self):
@@ -496,7 +496,7 @@ class TestIntegration:
 
 if __name__ == "__main__":
     print("\n" + "=" * 70)
-    print("RAG-TUI v0.0.1-beta PRODUCTION TESTS")
+    print("RAG-TUI v0.0.2-beta PRODUCTION TESTS")
     print("=" * 70 + "\n")
     
     # Run tests manually for detailed output
