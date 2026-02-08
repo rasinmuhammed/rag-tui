@@ -1,4 +1,4 @@
-"""RAG-TUI v0.0.3-beta: Interactive Chunking Debugger.
+"""RAG-TUI v0.0.4-beta: Interactive Chunking Debugger.
 
 A beautiful terminal UI for visualizing, debugging, and tuning RAG pipelines.
 Features: Multiple chunking strategies, multi-provider LLM, batch testing, export.
@@ -55,7 +55,7 @@ class RAGTUIApp(App):
     
     CSS_PATH = Path(__file__).parent / "styles" / "app.tcss"
     
-    TITLE = "RAG-TUI v0.0.3 Beta"
+    TITLE = "RAG-TUI v0.0.4 Beta"
     SUB_TITLE = "Interactive Chunking Debugger"
     
     BINDINGS = [

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rag-tui"
-version = "0.0.3b1"
+version = "0.0.4b1"
 description = "Interactive terminal UI for visualizing, debugging, and tuning RAG chunking pipelines"
 readme = "README.md"
 license = {text = "MIT"}
@@ -64,7 +64,7 @@ Repository = "https://github.com/rasinmuhammed/rag-tui"
 Issues = "https://github.com/rasinmuhammed/rag-tui/issues"
 
 [project.scripts]
-rag-tui = "rag_tui.app:main"
+rag-tui = "rag_tui.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["rag_tui"]
