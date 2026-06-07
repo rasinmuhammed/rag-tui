@@ -1,0 +1,44 @@
+version: "3.9"
+
+# Usage:
+#   docker compose run --rm rag-tui          # interactive TUI
+#   docker compose run --rm rag-tui chunk --file /data/doc.txt
+#   docker compose run --rm rag-tui optimize --file /data/doc.txt --queries-file /data/q.txt
+
+services:
+  rag-tui:
+    build: .
+    image: rasinmuhammed/rag-tui:latest
+    stdin_open: true
+    tty: true
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+      # Uncomment to use cloud providers instead:
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      # - GROQ_API_KEY=${GROQ_API_KEY}
+    volumes:
+      # Persist embedding cache and presets across container restarts
+      - rag_tui_data:/root/.rag-tui
+      # Mount a local directory as /data to easily pass files into the CLI
+      - ${RAG_TUI_DATA_DIR:-./}:/data:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  rag_tui_data:
+  ollama_models:
