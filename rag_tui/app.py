@@ -17,30 +17,7 @@ import json
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import builtins as _builtins_module
-
-# Restricted builtins for user-supplied custom chunker/cleaner code.
-# Excludes open, exec, eval, __import__, getattr, setattr, and other
-# dangerous callables. Users get pure data-processing primitives only.
-_SAFE_BUILTINS: dict = {
-    name: getattr(_builtins_module, name)
-    for name in (
-        "None", "True", "False",
-        "abs", "all", "any", "bin", "bool", "bytes", "bytearray",
-        "callable", "chr", "dict", "divmod", "enumerate",
-        "filter", "float", "format", "frozenset", "hasattr",
-        "hash", "hex", "int", "isinstance", "issubclass",
-        "iter", "len", "list", "map", "max", "min", "next",
-        "oct", "ord", "pow", "print", "range", "repr",
-        "reversed", "round", "set", "slice", "sorted", "str",
-        "sum", "tuple", "type", "zip",
-        "ArithmeticError", "AttributeError", "Exception",
-        "IndexError", "KeyError", "NameError", "NotImplementedError",
-        "OverflowError", "RuntimeError", "StopIteration",
-        "TypeError", "ValueError", "ZeroDivisionError",
-    )
-    if hasattr(_builtins_module, name)
-}
+from RestrictedPython import compile_restricted_exec, safe_builtins, safe_globals
 
 import numpy as np
 
@@ -771,14 +748,29 @@ class RAGTUIApp(App):
     # Custom chunker / cleaner
     # ------------------------------------------------------------------
 
+    def _exec_restricted(self, code: str) -> dict:
+        """Compile and execute user code under RestrictedPython's AST sandbox.
+
+        Blocks dunder attribute access (__class__, __subclasses__, etc.),
+        open(), exec(), eval(), __import__(), and all other dangerous builtins
+        at the AST transform level -- not just via a builtins allowlist.
+        Raises SyntaxError or the exception from the code itself on failure.
+        """
+        result = compile_restricted_exec(code)
+        if result.errors:
+            raise SyntaxError("\n".join(result.errors))
+        globs = {**safe_globals, "__builtins__": safe_builtins}
+        local_vars: dict = {}
+        exec(result.code, globs, local_vars)  # noqa: S102
+        return local_vars
+
     def _apply_custom_chunker(self) -> None:
         code = self.query_one("#custom-code", TextArea).text
         if not code.strip():
             self.notify("Enter Python code first.", severity="warning")
             return
         try:
-            local_vars: dict = {}
-            exec(code, {"__builtins__": _SAFE_BUILTINS}, local_vars)  # noqa: S102
+            local_vars = self._exec_restricted(code)
             chunk_fn = next(
                 (obj for name, obj in local_vars.items()
                  if callable(obj) and name.startswith("chunk")),
@@ -792,6 +784,8 @@ class RAGTUIApp(App):
             self.chunking_engine.set_strategy(StrategyType.CUSTOM)
             asyncio.create_task(self._rechunk())
             self.notify("Custom chunker applied!", timeout=2)
+        except SyntaxError as exc:
+            self.notify(f"Syntax error: {exc}", severity="error")
         except Exception as exc:
             self.notify(f"Code error: {exc}", severity="error")
 
@@ -802,8 +796,7 @@ class RAGTUIApp(App):
                 self._custom_cleaner = None
                 self.notify("Custom cleaner cleared.", timeout=2)
                 return
-            local_vars: dict = {}
-            exec(code, {"__builtins__": _SAFE_BUILTINS}, local_vars)  # noqa: S102
+            local_vars = self._exec_restricted(code)
             clean_fn = next(
                 (obj for name, obj in local_vars.items()
                  if callable(obj) and name.startswith("clean")),
@@ -814,6 +807,8 @@ class RAGTUIApp(App):
                 return
             self._custom_cleaner = clean_fn
             self.notify("Custom cleaner applied! Use Quick Clean to run it.", timeout=3)
+        except SyntaxError as exc:
+            self.notify(f"Syntax error: {exc}", severity="error")
         except Exception as exc:
             self.notify(f"Code error: {exc}", severity="error")
 
