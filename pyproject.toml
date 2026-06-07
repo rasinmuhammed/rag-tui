@@ -60,6 +60,7 @@ dependencies = [
     "pypdf>=3.0.0",
     "pyyaml>=6.0.0",
     "httpx>=0.25.0",
+    "RestrictedPython>=7.0",
 ]
 
 [project.optional-dependencies]
