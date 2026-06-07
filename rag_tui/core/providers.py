@@ -41,7 +41,7 @@ PROVIDER_CONFIGS = {
         embedding_model="nomic-embed-text",
         llm_model="llama3.2:1b",
         embedding_dim=768,
-        base_url="http://localhost:11434",
+        base_url=os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/"),
         supports_embedding=True,
         supports_llm=True,
     ),
@@ -80,32 +80,51 @@ PROVIDER_CONFIGS = {
 
 class LLMProvider(ABC):
     """Abstract base class for LLM providers."""
-    
+
+    # Subclasses set these to enable the shared embedding cache.
+    _cache_provider_name: str = ""
+    _cache_model_name: str = ""
+    _emb_cache = None  # lazy EmbeddingCache instance
+
+    def _get_cache(self):
+        """Return a lazily-initialised EmbeddingCache, or None if disabled."""
+        if not self._cache_provider_name or not self._cache_model_name:
+            return None
+        if self._emb_cache is None:
+            try:
+                from rag_tui.core.cache import EmbeddingCache
+                self._emb_cache = EmbeddingCache(
+                    self._cache_provider_name, self._cache_model_name
+                )
+            except Exception:
+                pass
+        return self._emb_cache
+
     @abstractmethod
     async def check_connection(self) -> bool:
         """Check if the provider is available."""
         pass
-    
+
     @abstractmethod
     async def embed(self, text: str) -> List[float]:
         """Get embedding for a single text."""
         pass
-    
+
     @abstractmethod
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
         """Get embeddings for multiple texts."""
         pass
-    
+
     @abstractmethod
     async def generate(self, prompt: str) -> str:
         """Generate a response."""
         pass
-    
+
     @abstractmethod
     async def stream_generate(self, prompt: str) -> AsyncIterator[str]:
         """Stream a response token by token."""
         pass
-    
+
     def build_rag_prompt(self, query: str, context_chunks: List[str]) -> str:
         """Build a RAG prompt with context."""
         context = "\n\n---\n\n".join(context_chunks)
@@ -121,10 +140,12 @@ Answer:"""
 
 class OllamaProvider(LLMProvider):
     """Ollama local LLM provider."""
-    
+
     def __init__(self, config: ProviderConfig):
         self.config = config
         self.client = httpx.AsyncClient(timeout=60.0)
+        self._cache_provider_name = "ollama"
+        self._cache_model_name = config.embedding_model
     
     async def check_connection(self) -> bool:
         try:
@@ -179,39 +200,48 @@ class OllamaProvider(LLMProvider):
         raise RuntimeError(f"Embedding failed after {max_retries} attempts: {last_error}")
     
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings with bulletproof error handling.
-        
-        Features:
-        - Global lock prevents concurrent batches from overwhelming Ollama
-        - Sequential processing with delays between requests
-        - Graceful handling of cancellation
-        """
-        # Initialize lock if needed (class-level singleton)
+        """Generate embeddings with cache support and bulletproof error handling."""
+        cache = self._get_cache()
+
+        # Serve hits from cache; only embed misses.
+        results: List[Optional[List[float]]] = [None] * len(texts)
+        miss_indices = []
+        if cache:
+            for i, text in enumerate(texts):
+                cached = cache.get(text)
+                if cached is not None:
+                    results[i] = cached.tolist()
+                else:
+                    miss_indices.append(i)
+        else:
+            miss_indices = list(range(len(texts)))
+
+        if not miss_indices:
+            return results  # type: ignore[return-value]
+
         if OllamaProvider._embedding_lock is None:
             OllamaProvider._embedding_lock = asyncio.Lock()
-        
+
         async with OllamaProvider._embedding_lock:
-            results = []
-            for i, text in enumerate(texts):
+            fresh_embeddings = []
+            for i, idx in enumerate(miss_indices):
                 try:
-                    # Check for cancellation before each embedding
-                    await asyncio.sleep(0)  # Yield to allow cancellation
-                    
-                    result = await self.embed(text)
-                    results.append(result)
-                    
-                    # Longer delay between requests (200ms) to prevent overload
-                    if i < len(texts) - 1:
+                    await asyncio.sleep(0)
+                    emb = await self.embed(texts[idx])
+                    fresh_embeddings.append(emb)
+                    results[idx] = emb
+                    if i < len(miss_indices) - 1:
                         await asyncio.sleep(0.2)
-                        
                 except asyncio.CancelledError:
-                    # Clean cancellation - return what we have so far or empty
                     raise
                 except Exception as e:
-                    # On any error, raise with context
-                    raise RuntimeError(f"Failed to embed chunk {i + 1}/{len(texts)}: {e}")
-            
-            return results
+                    raise RuntimeError(f"Failed to embed chunk {idx + 1}/{len(texts)}: {e}")
+
+        if cache and fresh_embeddings:
+            miss_texts = [texts[i] for i in miss_indices]
+            cache.put_batch(miss_texts, fresh_embeddings)
+
+        return results  # type: ignore[return-value]
     
     async def generate(self, prompt: str) -> str:
         response = await self.client.post(
@@ -237,13 +267,15 @@ class OllamaProvider(LLMProvider):
 
 class OpenAIProvider(LLMProvider):
     """OpenAI API provider."""
-    
+
     def __init__(self, config: ProviderConfig):
         self.config = config
         self.client = httpx.AsyncClient(
             timeout=60.0,
             headers={"Authorization": f"Bearer {config.api_key}"}
         )
+        self._cache_provider_name = "openai"
+        self._cache_model_name = config.embedding_model
     
     async def check_connection(self) -> bool:
         if not self.config.api_key:
@@ -263,12 +295,33 @@ class OpenAIProvider(LLMProvider):
         return response.json()["data"][0]["embedding"]
     
     async def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        response = await self.client.post(
-            f"{self.config.base_url}/embeddings",
-            json={"model": self.config.embedding_model, "input": texts}
-        )
-        response.raise_for_status()
-        return [d["embedding"] for d in response.json()["data"]]
+        cache = self._get_cache()
+        results: List[Optional[List[float]]] = [None] * len(texts)
+        miss_indices = []
+        if cache:
+            for i, text in enumerate(texts):
+                cached = cache.get(text)
+                if cached is not None:
+                    results[i] = cached.tolist()
+                else:
+                    miss_indices.append(i)
+        else:
+            miss_indices = list(range(len(texts)))
+
+        if miss_indices:
+            miss_texts = [texts[i] for i in miss_indices]
+            response = await self.client.post(
+                f"{self.config.base_url}/embeddings",
+                json={"model": self.config.embedding_model, "input": miss_texts},
+            )
+            response.raise_for_status()
+            fresh = [d["embedding"] for d in response.json()["data"]]
+            for idx, emb in zip(miss_indices, fresh):
+                results[idx] = emb
+            if cache:
+                cache.put_batch(miss_texts, fresh)
+
+        return results  # type: ignore[return-value]
     
     async def generate(self, prompt: str) -> str:
         response = await self.client.post(

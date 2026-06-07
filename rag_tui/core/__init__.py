@@ -1,6 +1,5 @@
-"""RAG-TUI Core - Chunking Engine, Strategies, and Utilities."""
+"""RAG-TUI Core — lazy re-exports so importing submodules stays lightweight."""
 
-from rag_tui.core.engine import ChunkingEngine
 from rag_tui.core.strategies import (
     StrategyType,
     ChunkingStrategy,
@@ -14,15 +13,27 @@ from rag_tui.core.strategies import (
     get_strategy_info,
     STRATEGIES,
 )
-from rag_tui.core.vector import VectorStore, EmbeddingCache
-from rag_tui.core.llm import OllamaLLM
+from rag_tui.core.engine import ChunkingEngine
 from rag_tui.core.file_handler import read_file, FileInfo, SUPPORTED_EXTENSIONS
 from rag_tui.core.metrics import ChunkConfig, QueryResult, BatchTestResult, calculate_batch_metrics
 
+
+def __getattr__(name):
+    """Lazy imports for heavy optional deps (usearch, ollama)."""
+    if name in ("VectorStore", "EmbeddingCache"):
+        from rag_tui.core.vector import VectorStore, EmbeddingCache
+        globals()["VectorStore"] = VectorStore
+        globals()["EmbeddingCache"] = EmbeddingCache
+        return globals()[name]
+    if name == "OllamaLLM":
+        from rag_tui.core.llm import OllamaLLM
+        globals()["OllamaLLM"] = OllamaLLM
+        return OllamaLLM
+    raise AttributeError(f"module 'rag_tui.core' has no attribute {name!r}")
+
+
 __all__ = [
-    # Engine
     "ChunkingEngine",
-    # Strategies
     "StrategyType",
     "ChunkingStrategy",
     "TokenStrategy",
@@ -34,16 +45,12 @@ __all__ = [
     "get_strategy",
     "get_strategy_info",
     "STRATEGIES",
-    # Vector
     "VectorStore",
     "EmbeddingCache",
-    # LLM
     "OllamaLLM",
-    # File
     "read_file",
     "FileInfo",
     "SUPPORTED_EXTENSIONS",
-    # Metrics
     "ChunkConfig",
     "QueryResult",
     "BatchTestResult",
