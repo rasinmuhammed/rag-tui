@@ -1,23 +1,24 @@
-"""RAG-TUI: Interactive Chunking Debugger for RAG Pipelines.
-
-A beautiful terminal UI for visualizing, debugging, and tuning 
-text chunking in RAG (Retrieval-Augmented Generation) pipelines.
+"""RAG-TUI: Interactive chunking debugger and optimizer for RAG pipelines.
 
 Features:
-    - Multiple chunking strategies (Token, Sentence, Paragraph, Recursive)
-    - Real-time chunk visualization with quality indicators
-    - Multi-provider LLM support (Ollama, OpenAI, Groq, Gemini)
-    - Batch testing with hit rate metrics
-    - Export to LangChain/LlamaIndex format
-    - Interactive Chat with your documents
+    - Six chunking strategies (Token, Sentence, Paragraph, Recursive, …)
+    - Real-time chunk visualization with overlap highlighting
+    - Multi-provider LLM/embedding (Ollama, OpenAI, Groq, Gemini)
+    - Full IR metric suite: MRR, nDCG@k, Recall@k, Precision@k
+    - Automated chunk-size recommender (A/B optimizer)
+    - Baseline comparison & regression detection
+    - Dataset import (CSV / JSONL)
+    - Persistent SQLite embedding cache
+    - Config export for LangChain and LlamaIndex
+    - Headless CLI and Python API for CI pipelines
 
 Usage:
-    python -m rag_tui.app
-    # or after installation:
-    rag-tui
+    rag-tui                          # launch interactive TUI
+    rag-tui chunk --file doc.txt     # headless chunking
+    rag-tui optimize --file doc.txt  # auto-recommend config
 """
 
-__version__ = "0.0.4-beta"
+__version__ = "0.1.0"
 __author__ = "Muhammed Rasin"
 
-__all__ = ["__version__", "__author__"]
+__all__ = ["__version__", "__author__", "api"]
