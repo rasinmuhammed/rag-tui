@@ -1,4 +1,4 @@
-"""Comprehensive production-level tests for RAG-TUI v0.0.3-beta."""
+"""Comprehensive production-level tests for RAG-TUI."""
 
 import pytest
 import asyncio
@@ -397,7 +397,11 @@ class TestMetricsExport:
 
 class TestUIWidgets:
     """Test UI widget imports and basic structure."""
-    
+
+    @pytest.fixture(autouse=True)
+    def require_textual(self):
+        pytest.importorskip("textual")
+
     def test_parameter_panel_import(self):
         """Test ParameterPanel can be imported."""
         from rag_tui.widgets.parameter_panel import ParameterPanel, ParameterControl
@@ -443,7 +447,11 @@ class TestUIWidgets:
 
 class TestIntegration:
     """Test full application integration."""
-    
+
+    @pytest.fixture(autouse=True)
+    def require_textual(self):
+        pytest.importorskip("textual")
+
     def test_app_import(self):
         """Test main app can be imported."""
         from rag_tui.app import RAGTUIApp, main
@@ -465,7 +473,7 @@ class TestIntegration:
         """Test package version."""
         import rag_tui
         
-        assert rag_tui.__version__ == "0.0.3-beta"
+        assert rag_tui.__version__ == "0.1.0"
         print(f"✅ Version: {rag_tui.__version__}")
     
     def test_vector_store(self):
