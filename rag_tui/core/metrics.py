@@ -15,12 +15,15 @@ from datetime import datetime
 class QueryResult:
     """Result of a single query."""
     query: str
-    chunks_retrieved: List[Tuple[str, float]]  # (chunk_text, score)
+    chunks_retrieved: List[Tuple[str, float]]  # (chunk_text, cosine_score)
     top_score: float
     avg_score: float
     response: Optional[str] = None
-    # Optional: index of the ground-truth relevant chunk within chunks_retrieved
-    ground_truth_rank: Optional[int] = None
+    # LLM-judge or ground-truth relevance labels per retrieved chunk (0-1).
+    # When present, metric functions use these instead of cosine thresholds.
+    relevance_labels: Optional[List[float]] = None
+    # LLM-judge faithfulness: can the query be answered from these chunks?
+    faithfulness: Optional[float] = None
 
 
 @dataclass
@@ -32,21 +35,27 @@ class BatchTestResult:
     # Score-based
     avg_top_score: float
     avg_retrieval_score: float
-    hit_rate: float          # fraction with top_score >= threshold
+    hit_rate: float
     # Standard IR metrics
-    mrr: float = 0.0         # Mean Reciprocal Rank
-    ndcg_at_k: float = 0.0  # nDCG @ top_k
+    mrr: float = 0.0
+    ndcg_at_k: float = 0.0
     recall_at_k: float = 0.0
     precision_at_k: float = 0.0
     top_k: int = 3
     threshold: float = 0.5
+    # Indicates whether metrics were computed from judge labels, ground truth,
+    # or cosine similarity. Consumers should display this to avoid misreading.
+    eval_mode: str = "similarity"
+    # Mean faithfulness across queries (only set in judge mode)
+    avg_faithfulness: Optional[float] = None
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "timestamp": self.timestamp,
             "total_queries": self.total_queries,
             "top_k": self.top_k,
             "threshold": self.threshold,
+            "eval_mode": self.eval_mode,
             "metrics": {
                 "hit_rate": round(self.hit_rate, 4),
                 "mrr": round(self.mrr, 4),
@@ -62,18 +71,31 @@ class BatchTestResult:
                     "top_score": round(q.top_score, 4),
                     "avg_score": round(q.avg_score, 4),
                     "chunks_count": len(q.chunks_retrieved),
+                    "faithfulness": round(q.faithfulness, 3) if q.faithfulness is not None else None,
                 }
                 for q in self.queries
             ],
         }
+        if self.avg_faithfulness is not None:
+            d["metrics"]["avg_faithfulness"] = round(self.avg_faithfulness, 4)
+        return d
 
     def summary_line(self) -> str:
+        mode_tag = {"judge": "[Judge]", "ground_truth": "[GT]", "similarity": "[Sim]"}.get(
+            self.eval_mode, ""
+        )
+        faith = (
+            f"  Faith: {self.avg_faithfulness:.3f}"
+            if self.avg_faithfulness is not None
+            else ""
+        )
         return (
-            f"Hit Rate: {self.hit_rate:.1%}  "
+            f"{mode_tag} Hit Rate: {self.hit_rate:.1%}  "
             f"MRR: {self.mrr:.3f}  "
             f"nDCG@{self.top_k}: {self.ndcg_at_k:.3f}  "
             f"Recall@{self.top_k}: {self.recall_at_k:.3f}  "
             f"P@{self.top_k}: {self.precision_at_k:.3f}"
+            f"{faith}"
         )
 
 
@@ -198,19 +220,31 @@ def compute_ndcg_at_k(scores: List[float], k: int) -> float:
     return _dcg_at_k(scores, k) / idcg
 
 
-def compute_mrr(results: List[QueryResult], threshold: float = 0.5) -> float:
-    """Mean Reciprocal Rank.
+def _relevance(r: QueryResult, idx: int, threshold: float) -> bool:
+    """True if chunk at idx is relevant, using labels when available."""
+    if r.relevance_labels and idx < len(r.relevance_labels):
+        return r.relevance_labels[idx] >= 0.5
+    _, score = r.chunks_retrieved[idx]
+    return score >= threshold
 
-    For each query, the reciprocal rank is 1/rank of the first retrieved chunk
-    whose score >= threshold. If none qualify, RR = 0.
-    """
+
+def _relevance_grade(r: QueryResult, idx: int) -> float:
+    """Graded relevance for nDCG: label score or cosine score."""
+    if r.relevance_labels and idx < len(r.relevance_labels):
+        return r.relevance_labels[idx]
+    _, score = r.chunks_retrieved[idx]
+    return score
+
+
+def compute_mrr(results: List[QueryResult], threshold: float = 0.5) -> float:
+    """Mean Reciprocal Rank using relevance labels when available."""
     if not results:
         return 0.0
     rrs = []
     for r in results:
         rr = 0.0
-        for rank, (_, score) in enumerate(r.chunks_retrieved, 1):
-            if score >= threshold:
+        for rank, _ in enumerate(r.chunks_retrieved, 1):
+            if _relevance(r, rank - 1, threshold):
                 rr = 1.0 / rank
                 break
         rrs.append(rr)
@@ -218,37 +252,39 @@ def compute_mrr(results: List[QueryResult], threshold: float = 0.5) -> float:
 
 
 def compute_recall_at_k(results: List[QueryResult], k: int = 3, threshold: float = 0.5) -> float:
-    """Recall@k: fraction of queries where any top-k result exceeds the threshold."""
+    """Recall@k: fraction of queries with at least one relevant chunk in top k."""
     if not results:
         return 0.0
     hits = sum(
         1 for r in results
-        if any(score >= threshold for _, score in r.chunks_retrieved[:k])
+        if any(_relevance(r, i, threshold) for i in range(min(k, len(r.chunks_retrieved))))
     )
     return hits / len(results)
 
 
 def compute_precision_at_k(results: List[QueryResult], k: int = 3, threshold: float = 0.5) -> float:
-    """Precision@k: mean fraction of top-k results that exceed the threshold."""
+    """Precision@k: mean fraction of top-k results that are relevant."""
     if not results:
         return 0.0
     precisions = []
     for r in results:
-        top = r.chunks_retrieved[:k]
-        if not top:
+        top_n = min(k, len(r.chunks_retrieved))
+        if not top_n:
             precisions.append(0.0)
         else:
-            relevant = sum(1 for _, score in top if score >= threshold)
-            precisions.append(relevant / len(top))
+            relevant = sum(1 for i in range(top_n) if _relevance(r, i, threshold))
+            precisions.append(relevant / top_n)
     return sum(precisions) / len(precisions)
 
 
 def compute_mean_ndcg(results: List[QueryResult], k: int = 3) -> float:
-    """Mean nDCG@k across all queries."""
+    """Mean nDCG@k using relevance labels when available, cosine scores otherwise."""
     if not results:
         return 0.0
-    scores_list = [[s for _, s in r.chunks_retrieved] for r in results]
-    ndcg_vals = [compute_ndcg_at_k(scores, k) for scores in scores_list]
+    ndcg_vals = []
+    for r in results:
+        grades = [_relevance_grade(r, i) for i in range(len(r.chunks_retrieved))]
+        ndcg_vals.append(compute_ndcg_at_k(grades, k))
     return sum(ndcg_vals) / len(ndcg_vals)
 
 
@@ -261,7 +297,14 @@ def calculate_batch_metrics(
     threshold: float = 0.5,
     top_k: int = 3,
 ) -> BatchTestResult:
-    """Calculate the full IR metric suite from batch query results."""
+    """Calculate the full IR metric suite from batch query results.
+
+    Automatically detects eval mode from whether relevance_labels are set:
+      - judge / ground_truth: uses labels on QueryResult.relevance_labels
+      - similarity: falls back to cosine >= threshold
+    """
+    from rag_tui.core.judge import EVAL_MODE_JUDGE, EVAL_MODE_GROUND_TRUTH, EVAL_MODE_SIMILARITY
+
     if not results:
         return BatchTestResult(
             queries=[],
@@ -280,7 +323,25 @@ def calculate_batch_metrics(
 
     avg_top = sum(r.top_score for r in results) / len(results)
     avg_ret = sum(r.avg_score for r in results) / len(results)
-    hits = sum(1 for r in results if r.top_score >= threshold)
+    hits = sum(
+        1 for r in results
+        if any(_relevance(r, i, threshold) for i in range(len(r.chunks_retrieved)))
+    )
+
+    # Detect eval mode from labels
+    labeled = [r for r in results if r.relevance_labels]
+    if len(labeled) == len(results):
+        # Distinguish judge (float labels) from ground truth (binary-ish labels)
+        # Judge labels come from the judge module and are tagged on the result;
+        # we can't tell them apart here so we just call it "judge" if all labeled.
+        eval_mode = EVAL_MODE_JUDGE
+    elif labeled:
+        eval_mode = EVAL_MODE_GROUND_TRUTH
+    else:
+        eval_mode = EVAL_MODE_SIMILARITY
+
+    faith_scores = [r.faithfulness for r in results if r.faithfulness is not None]
+    avg_faith = sum(faith_scores) / len(faith_scores) if faith_scores else None
 
     return BatchTestResult(
         queries=results,
@@ -295,6 +356,8 @@ def calculate_batch_metrics(
         precision_at_k=compute_precision_at_k(results, top_k, threshold),
         top_k=top_k,
         threshold=threshold,
+        eval_mode=eval_mode,
+        avg_faithfulness=avg_faith,
     )
 
 

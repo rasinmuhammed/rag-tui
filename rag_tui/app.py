@@ -154,9 +154,15 @@ class RAGTUIApp(App):
                     yield TextArea(id="batch-queries")
                     with Horizontal(classes="button-row"):
                         yield Button("Run Batch Test", id="run-batch-btn", variant="success")
-                        yield Button("Save as Baseline", id="save-baseline-btn", variant="primary")
+                        yield Button("Run with Judge", id="run-judge-btn", variant="primary")
+                        yield Button("Save as Baseline", id="save-baseline-btn", variant="default")
                         yield Button("Compare to Baseline", id="compare-baseline-btn", variant="default")
                         yield Button("Clear Results", id="clear-batch-btn", variant="default")
+                    yield Static(
+                        "Tip: 'Run with Judge' scores each retrieved chunk using your LLM for real relevance metrics.",
+                        classes="tab-intro",
+                        id="judge-tip",
+                    )
                     yield Static("", id="batch-results", classes="batch-results")
                     yield Static("", id="baseline-comparison", classes="batch-results")
 
@@ -524,7 +530,7 @@ class RAGTUIApp(App):
     # Batch testing
     # ------------------------------------------------------------------
 
-    async def _run_batch_test(self) -> Optional[BatchTestResult]:
+    async def _run_batch_test(self, use_judge: bool = False) -> Optional[BatchTestResult]:
         if not self.embedding_provider:
             self.notify("Embedding provider not available.", severity="error")
             return None
@@ -535,45 +541,77 @@ class RAGTUIApp(App):
             self.notify("Enter queries first.", severity="warning")
             return None
 
-        self.notify(f"Running {len(queries)} queries...", timeout=2)
+        if use_judge and not self.llm_provider:
+            self.notify("Judge mode requires an LLM provider (run Ollama or set an API key).", severity="warning")
+            return None
+
+        judge = None
+        if use_judge:
+            from rag_tui.core.judge import LLMJudge
+            judge = LLMJudge(self.llm_provider)
+
+        msg = f"Running {len(queries)} queries" + (" with LLM judge..." if judge else "...")
+        self.notify(msg, timeout=3)
+
         results = []
         for query in queries:
             try:
                 search_results = await self._search(query)
                 if search_results:
                     scores = [r[1] for r in search_results]
+                    chunks_text = [r[0] for r in search_results]
+                    relevance_labels = None
+                    faithfulness = None
+                    if judge:
+                        relevance_labels, faithfulness = await judge.evaluate_query(
+                            query, chunks_text
+                        )
                     results.append(QueryResult(
                         query=query,
                         chunks_retrieved=[(r[0][:100], r[1]) for r in search_results],
                         top_score=max(scores),
                         avg_score=sum(scores) / len(scores),
+                        relevance_labels=relevance_labels,
+                        faithfulness=faithfulness,
                     ))
                 else:
                     results.append(QueryResult(
                         query=query, chunks_retrieved=[],
                         top_score=0.0, avg_score=0.0,
                     ))
-            except Exception:
-                self.notify(f"Query failed: {query[:30]}", severity="warning")
+            except Exception as exc:
+                self.notify(f"Query failed: {query[:30]} ({exc})", severity="warning")
 
         batch = calculate_batch_metrics(results)
         self._batch_results = results
         self._render_batch_results(batch)
-        self.notify("Batch test complete", timeout=2)
+        done_msg = "Batch test complete" + (" (Judge mode)" if judge else "")
+        self.notify(done_msg, timeout=3)
         return batch
 
     def _render_batch_results(self, batch: BatchTestResult) -> None:
         results_widget = self.query_one("#batch-results", Static)
+        mode_labels = {
+            "judge": "LLM Judge (real relevance)",
+            "ground_truth": "Ground Truth labels",
+            "similarity": "Cosine Similarity >= threshold (proxy)",
+        }
+        mode_display = mode_labels.get(batch.eval_mode, batch.eval_mode)
+        faith_line = (
+            f"Faithfulness:    {batch.avg_faithfulness:.4f}\n"
+            if batch.avg_faithfulness is not None else ""
+        )
         text = (
             f"Batch Test Results\n"
             f"{'━'*42}\n"
-            f"Queries: {batch.total_queries}\n"
+            f"Queries: {batch.total_queries}   Eval: {mode_display}\n"
             f"\n"
-            f"Hit Rate (>{batch.threshold:.0%}): {batch.hit_rate:.1%}\n"
+            f"Hit Rate:        {batch.hit_rate:.1%}\n"
             f"MRR:             {batch.mrr:.4f}\n"
             f"nDCG@{batch.top_k}:          {batch.ndcg_at_k:.4f}\n"
             f"Recall@{batch.top_k}:        {batch.recall_at_k:.4f}\n"
             f"Precision@{batch.top_k}:     {batch.precision_at_k:.4f}\n"
+            f"{faith_line}"
             f"Avg Top Score:   {batch.avg_top_score:.4f}\n"
             f"\nQuery Details:\n"
         )
@@ -664,6 +702,8 @@ class RAGTUIApp(App):
                 self._clear_text_widget()
             case "run-batch-btn":
                 await self._run_batch_test()
+            case "run-judge-btn":
+                await self._run_batch_test(use_judge=True)
             case "save-baseline-btn":
                 if self._batch_results:
                     batch = calculate_batch_metrics(self._batch_results)

@@ -144,6 +144,7 @@ async def _build_eval_output(
     top_k: int,
     threshold: float,
     provider_name: Optional[str],
+    use_judge: bool = False,
 ) -> dict:
     engine = ChunkingEngine()
     overlap = _overlap_tokens(chunk_size, overlap_percent)
@@ -160,6 +161,14 @@ async def _build_eval_output(
     store = VectorStore(embedding_dim=len(chunk_embeddings[0]))
     store.add_chunks(chunks, np.array(chunk_embeddings))
 
+    judge = None
+    if use_judge:
+        from rag_tui.core.judge import LLMJudge
+        if not hasattr(provider, "generate"):
+            _die("--use-judge requires a provider with LLM generation support (Ollama, OpenAI, Groq).")
+        judge = LLMJudge(provider)
+        print("Judge mode: scoring each retrieved chunk with LLM...", file=sys.stderr)
+
     query_results: List[QueryResult] = []
     for query in queries:
         q_emb = np.array(await provider.embed(query))
@@ -167,11 +176,18 @@ async def _build_eval_output(
         retrieved = [(m[0], m[1]) for m in matches]
         top_score = retrieved[0][1] if retrieved else 0.0
         avg_score = sum(s for _, s in retrieved) / len(retrieved) if retrieved else 0.0
+        relevance_labels = None
+        faithfulness = None
+        if judge and retrieved:
+            chunks_text = [c for c, _ in retrieved]
+            relevance_labels, faithfulness = await judge.evaluate_query(query, chunks_text)
         query_results.append(QueryResult(
             query=query,
             chunks_retrieved=retrieved,
             top_score=top_score,
             avg_score=avg_score,
+            relevance_labels=relevance_labels,
+            faithfulness=faithfulness,
         ))
 
     batch = calculate_batch_metrics(query_results, threshold=threshold, top_k=top_k)
@@ -214,6 +230,7 @@ async def _run_eval(args: argparse.Namespace) -> int:
         top_k=args.top_k,
         threshold=args.threshold,
         provider_name=args.provider,
+        use_judge=getattr(args, "use_judge", False),
     )
 
     if args.save_baseline:
@@ -405,6 +422,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ep.add_argument(
         "--save-baseline", metavar="FILE",
         help="Save this run's metrics to FILE for later comparison",
+    )
+    ep.add_argument(
+        "--use-judge", action="store_true", default=False,
+        help="Score retrieved chunks with LLM judge for real relevance metrics (requires LLM provider)",
     )
     ep.set_defaults(func=_run_eval)
 
