@@ -59,11 +59,30 @@ This is the first stable release. The version jump from 0.0.4-beta reflects the 
 - `docker-compose.yml` with Ollama sidecar
 - `OLLAMA_HOST` environment variable respected throughout (TUI, CLI, API)
 
+**LLM-as-Judge evaluation**
+- New "Run with Judge" button in the Batch tab
+- `LLMJudge` class in `core/judge.py` scores each retrieved chunk for relevance (0-1) using your LLM provider
+- `score_faithfulness`: asks whether the retrieved chunks are sufficient to answer the query
+- All five IR metrics (MRR, nDCG@k, Recall@k, Precision@k, Hit Rate) use judge labels instead of cosine similarity when available, so the numbers reflect actual retrieval quality
+- Works fully offline with Ollama. No OpenAI key required for judging.
+- `--use-judge` flag added to `rag-tui eval` CLI command
+- `QueryResult.relevance_labels` and `QueryResult.faithfulness` fields added
+- `BatchTestResult.eval_mode` field labels every result as "judge", "ground_truth", or "similarity" so proxy metrics are never confused for real ones
+- `ground_truth_labels()` helper for dataset-based evaluation with known relevant chunks
+
 **Security**
 - Custom chunker and cleaner code now runs under RestrictedPython
 - Blocks dunder attribute access (`__class__`, `__subclasses__`, etc.) at AST compile time
 - `open()`, `eval()`, `exec()`, `__import__()` and other dangerous builtins removed from sandbox
 - RestrictedPython added as a hard dependency
+
+**UI/UX overhaul**
+- Persistent status strip docked below the strategy bar shows: active strategy, chunk size, overlap, provider, and chunk count at all times. No more hunting through tabs to remember what config is active.
+- Batch results now display as color-coded metric bars (green >= 0.7, amber >= 0.4, red < 0.4) with Rich markup. Metric health is readable at a glance.
+- Baseline comparison redesigned with ▲/▼ arrows, color-coded deltas, and absolute + percentage change per metric.
+- Chunk cards reduced from max-height 20 to 13, making more chunks visible at once. Quality indicators replaced with clean ASCII (◉/◎/◌) instead of emoji for compatibility. Border style changed to `tall` for better depth perception. Color rotation preserved.
+- Search result cards: rank and similarity bar combined into a single header line. Bar width increased from 30 to 36 characters for better score granularity.
+- Full CSS design system in `app.tcss`: consistent border hierarchy (tall=interactive, solid=structural), spacing rhythm, and semantic color usage for metrics.
 
 ### Changed
 
