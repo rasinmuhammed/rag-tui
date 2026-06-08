@@ -749,12 +749,11 @@ class RAGTUIApp(App):
     # ------------------------------------------------------------------
 
     def _exec_restricted(self, code: str) -> dict:
-        """Compile and execute user code under RestrictedPython's AST sandbox.
+        """Compile and run user code under RestrictedPython's AST sandbox.
 
         Blocks dunder attribute access (__class__, __subclasses__, etc.),
-        open(), exec(), eval(), __import__(), and all other dangerous builtins
-        at the AST transform level -- not just via a builtins allowlist.
-        Raises SyntaxError or the exception from the code itself on failure.
+        open(), exec(), eval(), __import__(), and all dangerous builtins
+        at the AST transform level, not just via a runtime allowlist.
         """
         result = compile_restricted_exec(code)
         if result.errors:
