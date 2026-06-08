@@ -18,6 +18,25 @@ The core loop is simple: load your document, tune your chunking strategy, run re
 
 ---
 
+## Why RAG-TUI
+
+Most RAG evaluation tools require cloud APIs, Python notebooks, or treat evaluation as an afterthought.
+
+RAG-TUI works **entirely offline**. When you run LLM-as-judge evaluation, it uses your local Ollama instance. No OpenAI key required. Your documents never leave your machine.
+
+| | RAG-TUI | Ragas | TruLens | DeepEval |
+|---|---|---|---|---|
+| Works offline (Ollama) | Yes | Partial | No | Partial |
+| LLM judge without cloud | Yes | No | No | No |
+| Visual chunking debugger | Yes | No | No | No |
+| Auto-optimize chunk config | Yes | No | No | No |
+| Terminal-native (no notebook) | Yes | No | No | No |
+| CI/CD-ready CLI | Yes | Partial | Partial | Yes |
+
+The visual layer is the other differentiator. Every other tool is either a Python library you call from a script or a hosted dashboard. RAG-TUI lets you watch your chunks form in real time, see overlap highlighting, and understand *why* a specific query retrieves the wrong content. You can fix chunking problems by looking, not by reading logs.
+
+---
+
 ## Install
 
 ```bash
@@ -42,6 +61,8 @@ If you want to use local embeddings with no API keys, install Ollama and run `ol
 ---
 
 ## The TUI: seven tabs, one workflow
+
+The app shows a persistent status strip below the strategy bar at all times: current strategy, chunk size, overlap, provider, and chunk count. You always know what config is active without switching tabs.
 
 ### Input tab
 
@@ -78,7 +99,9 @@ Type any query and see which chunks get retrieved. Results show similarity score
 
 ### Batch tab
 
-Paste a list of queries and run a full retrieval evaluation in one shot. You get five metrics back:
+Paste a list of queries and run a full retrieval evaluation in one shot. Results display as color-coded metric bars, so you can read pipeline health at a glance rather than parsing numbers.
+
+**Five standard IR metrics:**
 
 - **Hit Rate**: the fraction of queries where at least one relevant chunk was retrieved
 - **MRR** (Mean Reciprocal Rank): how high the first relevant chunk ranks on average
@@ -86,7 +109,14 @@ Paste a list of queries and run a full retrieval evaluation in one shot. You get
 - **Recall@k**: how much relevant content is captured in the top k results
 - **Precision@k**: how much of the top k results is actually relevant
 
-**Baseline comparison**: save any run as your baseline, tune your config, run again, and get a metric-by-metric delta table. Regressions are flagged immediately.
+**Two evaluation modes:**
+
+- **Run Batch Test**: fast similarity-based scoring (cosine threshold). No LLM calls, runs in seconds.
+- **Run with Judge**: LLM-as-judge mode. For each retrieved chunk, your local LLM scores its relevance to the query (0-1). MRR, nDCG, and Hit Rate are then computed from these scores instead of cosine similarity, which means the numbers actually reflect retrieval quality, not just vector distance. Also scores **faithfulness**: whether the retrieved chunks are sufficient to answer the query.
+
+The judge mode works with any provider including Ollama, so no cloud API is required. Metrics are labeled with their eval mode so you never confuse proxy metrics for real ones.
+
+**Baseline comparison**: save any run as your baseline, tune your config, run again, and get a metric-by-metric delta table. Each metric shows the direction change (▲/▼), absolute delta, and percentage change. Regressions are flagged in red immediately.
 
 ### Optimize tab
 
@@ -140,12 +170,17 @@ Output includes every chunk with its start/end positions, plus aggregate stats.
 # Queries from a file
 rag-tui eval --file doc.txt --queries-file queries.txt --chunk-size 200 --top-k 3
 
+# LLM-as-judge mode: real relevance scores, no cosine proxy
+rag-tui eval --file doc.txt --queries-file queries.txt --use-judge
+
 # Queries from a CSV/JSONL dataset
 rag-tui eval --file doc.txt --dataset-file queries.csv --strategy sentence
 
 # Save as a baseline for later comparison
 rag-tui eval --file doc.txt --queries-file queries.txt --save-baseline baseline.json
 ```
+
+With `--use-judge`, each retrieved chunk is scored by your local LLM for relevance. All five IR metrics are computed from these scores, not cosine similarity. The output includes per-query faithfulness scores and labels the eval mode so you can tell proxy metrics from real ones at a glance.
 
 ### Auto-optimize chunk configuration
 
