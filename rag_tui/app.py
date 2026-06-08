@@ -123,6 +123,8 @@ class RAGTUIApp(App):
             yield Input(placeholder="Path to file...", id="file-path-input")
             yield Button("Load", id="load-file-btn", variant="primary")
 
+        yield Static("", id="status-strip", markup=True)
+
         with TabbedContent(id="main-tabs"):
             # 1 — Input
             with TabPane("Input", id="input-tab"):
@@ -245,6 +247,30 @@ class RAGTUIApp(App):
 
         await self.action_load_sample()
         self._update_export_preview()
+        self._update_status_strip()
+
+    def _update_status_strip(self) -> None:
+        """Refresh the always-visible status bar with current config context."""
+        from rich.markup import escape
+        try:
+            strategy = self._current_strategy.value if self._current_strategy else "token"
+            chunks = len(self._current_chunks)
+            chunks_str = f"[cyan]{chunks}[/cyan] chunk{'s' if chunks != 1 else ''}"
+            provider_str = (
+                f"[green]{escape(self.embedding_provider.config.name)}[/green]"
+                if self.embedding_provider
+                else "[dim]no provider[/dim]"
+            )
+            strip = self.query_one("#status-strip", Static)
+            strip.update(
+                f" [bold cyan]{escape(strategy)}[/bold cyan]"
+                f"  [dim]·[/dim]  [cyan]{self._chunk_size}[/cyan] tok"
+                f"  [dim]·[/dim]  [cyan]{self._overlap_percent}%[/cyan] ovlp"
+                f"  [dim]│[/dim]  {provider_str}"
+                f"  [dim]│[/dim]  {chunks_str}"
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Event handlers — top-level widgets
@@ -261,6 +287,7 @@ class RAGTUIApp(App):
             }
             self._current_strategy = strategy_map.get(str(event.value), StrategyType.TOKEN)
             self.chunking_engine.set_strategy(self._current_strategy)
+            self._update_status_strip()
             asyncio.create_task(self._rechunk())
             self.notify(f"Strategy: {event.value}", timeout=1)
 
@@ -270,6 +297,7 @@ class RAGTUIApp(App):
         self._chunk_size = event.chunk_size
         self._overlap_percent = event.overlap_percent
         self._update_export_preview()
+        self._update_status_strip()
         await self._debounced_rechunk()
 
     async def on_text_area_changed(self, event: TextArea.Changed) -> None:
@@ -370,6 +398,7 @@ class RAGTUIApp(App):
             pass
 
         self._update_export_preview()
+        self._update_status_strip()
         asyncio.create_task(self._rechunk())
         self.notify(
             f"Applied: {event.chunk_size} tokens, {event.overlap_percent}% overlap, {event.strategy}",
@@ -416,9 +445,9 @@ class RAGTUIApp(App):
             if self._current_chunks:
                 stats = self.chunking_engine.get_chunk_stats(self._current_chunks)
                 summary.update(
-                    f"{stats['total_chunks']} chunks | "
-                    f"Avg: {stats['avg_chunk_size']:.0f} chars | "
-                    f"Total: {stats['total_characters']:,} chars | "
+                    f"{stats['total_chunks']} chunks  ·  "
+                    f"avg {stats['avg_chunk_size']:.0f} chars  ·  "
+                    f"total {stats['total_characters']:,} chars  ·  "
                     f"~{stats['total_tokens_est']} tokens"
                 )
                 try:
@@ -429,6 +458,7 @@ class RAGTUIApp(App):
                     pass
             else:
                 summary.update("No chunks yet")
+            self._update_status_strip()
         except Exception:
             pass
 
@@ -589,42 +619,72 @@ class RAGTUIApp(App):
         self.notify(done_msg, timeout=3)
         return batch
 
+    @staticmethod
+    def _metric_bar(label: str, value: float, bar_width: int = 24) -> str:
+        """Render a labeled metric bar with Rich color coding."""
+        filled = int(bar_width * min(1.0, max(0.0, value)))
+        empty = bar_width - filled
+        if value >= 0.7:
+            bar_color, val_color = "green", "bright_green"
+        elif value >= 0.4:
+            bar_color, val_color = "yellow", "bright_yellow"
+        else:
+            bar_color, val_color = "red", "bright_red"
+        bar = f"[{bar_color}]{'█' * filled}[/{bar_color}][dim]{'░' * empty}[/dim]"
+        val = f"[{val_color}]{value:.3f}[/{val_color}]"
+        return f"  {label:<14} {bar}  {val}"
+
     def _render_batch_results(self, batch: BatchTestResult) -> None:
+        from rich.markup import escape
         results_widget = self.query_one("#batch-results", Static)
-        mode_labels = {
-            "judge": "LLM Judge (real relevance)",
-            "ground_truth": "Ground Truth labels",
-            "similarity": "Cosine Similarity >= threshold (proxy)",
+
+        mode_styles = {
+            "judge": "[bold green]LLM Judge[/bold green] [dim]· real relevance via LLM scoring[/dim]",
+            "ground_truth": "[bold cyan]Ground Truth[/bold cyan] [dim]· labeled dataset[/dim]",
+            "similarity": "[yellow]Cosine Similarity[/yellow] [dim]· proxy metric (no ground truth)[/dim]",
         }
-        mode_display = mode_labels.get(batch.eval_mode, batch.eval_mode)
-        faith_line = (
-            f"Faithfulness:    {batch.avg_faithfulness:.4f}\n"
-            if batch.avg_faithfulness is not None else ""
-        )
-        text = (
-            f"Batch Test Results\n"
-            f"{'━'*42}\n"
-            f"Queries: {batch.total_queries}   Eval: {mode_display}\n"
-            f"\n"
-            f"Hit Rate:        {batch.hit_rate:.1%}\n"
-            f"MRR:             {batch.mrr:.4f}\n"
-            f"nDCG@{batch.top_k}:          {batch.ndcg_at_k:.4f}\n"
-            f"Recall@{batch.top_k}:        {batch.recall_at_k:.4f}\n"
-            f"Precision@{batch.top_k}:     {batch.precision_at_k:.4f}\n"
-            f"{faith_line}"
-            f"Avg Top Score:   {batch.avg_top_score:.4f}\n"
-            f"\nQuery Details:\n"
-        )
+        mode_line = mode_styles.get(batch.eval_mode, escape(batch.eval_mode))
+        divider = f"[dim]{'─' * 46}[/dim]"
+
+        lines = [
+            f"[bold]Batch Results[/bold]  [dim]{batch.total_queries} queries[/dim]",
+            f"  Eval: {mode_line}",
+            divider,
+            self._metric_bar("Hit Rate", batch.hit_rate),
+            self._metric_bar("MRR", batch.mrr),
+            self._metric_bar(f"nDCG@{batch.top_k}", batch.ndcg_at_k),
+            self._metric_bar(f"Recall@{batch.top_k}", batch.recall_at_k),
+            self._metric_bar(f"Precision@{batch.top_k}", batch.precision_at_k),
+        ]
+        if batch.avg_faithfulness is not None:
+            lines.append(self._metric_bar("Faithfulness", batch.avg_faithfulness))
+        lines.extend([
+            divider,
+            f"[bold]Query Details[/bold]  [dim]top {min(10, batch.total_queries)}[/dim]",
+        ])
+
         for i, r in enumerate(batch.queries[:10], 1):
-            ok = "OK" if r.top_score > batch.threshold else "--"
-            text += (
-                f"\n{i:>2}. [{ok}] \"{r.query[:45]}\"\n"
-                f"    Top: {r.top_score:.3f}  Avg: {r.avg_score:.3f}\n"
+            if r.relevance_labels:
+                relevant = any(lbl >= 0.5 for lbl in r.relevance_labels)
+            else:
+                relevant = r.top_score >= batch.threshold
+            status = "[green]✓[/green]" if relevant else "[red]✗[/red]"
+            score_color = "green" if r.top_score >= 0.7 else ("yellow" if r.top_score >= 0.4 else "red")
+            faith_str = ""
+            if r.faithfulness is not None:
+                fc = "green" if r.faithfulness >= 0.7 else ("yellow" if r.faithfulness >= 0.4 else "red")
+                faith_str = f"  faith=[{fc}]{r.faithfulness:.2f}[/{fc}]"
+            lines.append(
+                f"  {status} [dim]{i:>2}.[/dim] [italic]{escape(r.query[:52])}[/italic]"
+            )
+            lines.append(
+                f"       score=[{score_color}]{r.top_score:.3f}[/{score_color}]{faith_str}"
             )
             if r.chunks_retrieved:
-                preview = r.chunks_retrieved[0][0][:60].replace("\n", " ")
-                text += f"    Match: \"{preview}\"\n"
-        results_widget.update(text)
+                preview = escape(r.chunks_retrieved[0][0][:64].replace("\n", " "))
+                lines.append(f"       [dim]↳ {preview}[/dim]")
+
+        results_widget.update("\n".join(lines))
 
     def _save_baseline(self, batch: BatchTestResult) -> None:
         self._baseline_result = batch
@@ -662,23 +722,34 @@ class RAGTUIApp(App):
         )
 
         cmp_widget = self.query_one("#baseline-comparison", Static)
+        divider = f"[dim]{'─' * 46}[/dim]"
         lines = [
-            "Baseline Comparison",
-            "━" * 42,
-            f"Baseline: {self._baseline_config.strategy} / "
-            f"{self._baseline_config.chunk_size} tokens / "
-            f"{self._baseline_config.overlap_percent}% overlap",
-            f"Current:  {current_cfg.strategy} / "
-            f"{current_cfg.chunk_size} tokens / "
-            f"{current_cfg.overlap_percent}% overlap",
-            "",
-            "Metric Deltas:",
+            "[bold]Baseline Comparison[/bold]",
+            divider,
+            f"  Baseline: [cyan]{self._baseline_config.strategy}[/cyan]"
+            f" / [cyan]{self._baseline_config.chunk_size}[/cyan] tok"
+            f" / [cyan]{self._baseline_config.overlap_percent}%[/cyan] ovlp",
+            f"  Current:  [cyan]{current_cfg.strategy}[/cyan]"
+            f" / [cyan]{current_cfg.chunk_size}[/cyan] tok"
+            f" / [cyan]{current_cfg.overlap_percent}%[/cyan] ovlp",
+            divider,
+            "[bold]Metric Deltas[/bold]",
         ]
         for d in comparison.deltas:
-            lines.append(f"  {d.to_display()}")
+            sign = "+" if d.delta >= 0 else ""
+            arrow = "[green]▲[/green]" if d.improved else "[red]▼[/red]"
+            delta_color = "green" if d.improved else "red"
+            lines.append(
+                f"  {arrow} {d.metric:<16}"
+                f" [dim]{d.baseline:.3f}[/dim] → [bold]{d.current:.3f}[/bold]"
+                f"  [{delta_color}]{sign}{d.delta:.3f} ({sign}{d.delta_pct:.1f}%)[/{delta_color}]"
+            )
 
-        verdict = "IMPROVED" if comparison.overall_improved else "REGRESSION"
-        lines.append(f"\nVerdict: {verdict}")
+        if comparison.overall_improved:
+            verdict = "[bold green]IMPROVED[/bold green]"
+        else:
+            verdict = "[bold red]REGRESSION[/bold red]"
+        lines.extend([divider, f"  Verdict: {verdict}"])
         cmp_widget.update("\n".join(lines))
 
         severity = "information" if comparison.overall_improved else "warning"
