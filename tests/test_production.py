@@ -212,7 +212,9 @@ class TestProviders:
             assert provider_type in PROVIDER_CONFIGS
             config = PROVIDER_CONFIGS[provider_type]
             assert config.name
-            assert config.base_url
+            # The built-in provider runs in-process, so it has no endpoint.
+            if provider_type is not ProviderType.LOCAL:
+                assert config.base_url
         
         print("✅ All provider configs defined")
     
@@ -470,10 +472,29 @@ class TestIntegration:
         print("✅ App instantiates")
     
     def test_package_version(self):
-        """Test package version."""
+        """Package version is well-formed and matches pyproject.toml.
+
+        Asserting a literal version means every release breaks this test; the
+        invariant worth guarding is that the two declarations never drift.
+        """
+        import re
+        from pathlib import Path
+
         import rag_tui
-        
-        assert rag_tui.__version__ == "0.1.0"
+
+        assert re.fullmatch(r"\d+\.\d+\.\d+", rag_tui.__version__), (
+            f"Version {rag_tui.__version__!r} is not semver"
+        )
+
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        declared = re.search(
+            r'^version\s*=\s*"([^"]+)"', pyproject.read_text(), re.MULTILINE
+        )
+        assert declared, "No version found in pyproject.toml"
+        assert rag_tui.__version__ == declared.group(1), (
+            f"__init__.py says {rag_tui.__version__}, "
+            f"pyproject.toml says {declared.group(1)}"
+        )
         print(f"✅ Version: {rag_tui.__version__}")
     
     def test_vector_store(self):

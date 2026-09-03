@@ -1,4 +1,4 @@
-"""RAG-TUI Core — lazy re-exports so importing submodules stays lightweight."""
+"""RAG-TUI core: lazy re-exports so importing submodules stays lightweight."""
 
 from rag_tui.core.strategies import (
     StrategyType,
@@ -16,6 +16,7 @@ from rag_tui.core.strategies import (
 from rag_tui.core.engine import ChunkingEngine
 from rag_tui.core.file_handler import read_file, FileInfo, SUPPORTED_EXTENSIONS
 from rag_tui.core.metrics import ChunkConfig, QueryResult, BatchTestResult, calculate_batch_metrics
+from rag_tui.core.doctor import DoctorReport, Finding, analyze as analyze_corpus
 
 
 def __getattr__(name):
@@ -55,4 +56,7 @@ __all__ = [
     "QueryResult",
     "BatchTestResult",
     "calculate_batch_metrics",
+    "DoctorReport",
+    "Finding",
+    "analyze_corpus",
 ]

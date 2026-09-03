@@ -1,41 +1,16 @@
 # RAG-TUI
 
-**The terminal-native debugger and optimizer for RAG chunking pipelines.**
+Your retrieval keeps returning the wrong chunk and you cannot see why.
 
-You built a RAG system. It retrieves the wrong chunks half the time and you have no idea why. You tweak the chunk size, re-run the pipeline, test again, and still can't see what's happening. RAG-TUI exists to fix that workflow. It makes chunking visible, measurable, and tunable, right in your terminal.
+So you change `chunk_size` from 512 to 256. Re-embed. Re-run. You get a different wrong answer. You put it back to 512 and try a different overlap. Somewhere in there you stopped engineering and started turning a dial in the dark.
+
+RAG-TUI puts the dial and the readout on the same screen.
 
 [![PyPI version](https://badge.fury.io/py/rag-tui.svg)](https://pypi.org/project/rag-tui/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
----
-
-## What it does
-
-RAG-TUI is a full-featured interactive tool for debugging and optimizing RAG chunking pipelines. It runs entirely in your terminal, works with any embedding provider, and ships with both a visual TUI and a headless CLI and Python API for CI pipelines.
-
-The core loop is simple: load your document, tune your chunking strategy, run retrieval tests, and get real IR metrics back immediately. When you find a configuration that works, export it directly to LangChain or LlamaIndex format.
-
----
-
-## Why RAG-TUI
-
-Most RAG evaluation tools require cloud APIs, Python notebooks, or treat evaluation as an afterthought.
-
-RAG-TUI works **entirely offline**. When you run LLM-as-judge evaluation, it uses your local Ollama instance. No OpenAI key required. Your documents never leave your machine.
-
-| | RAG-TUI | Ragas | TruLens | DeepEval |
-|---|---|---|---|---|
-| Works offline (Ollama) | Yes | Partial | No | Partial |
-| LLM judge without cloud | Yes | No | No | No |
-| Visual chunking debugger | Yes | No | No | No |
-| Auto-optimize chunk config | Yes | No | No | No |
-| Terminal-native (no notebook) | Yes | No | No | No |
-| CI/CD-ready CLI | Yes | Partial | Partial | Yes |
-
-The visual layer is the other differentiator. Every other tool is either a Python library you call from a script or a hosted dashboard. RAG-TUI lets you watch your chunks form in real time, see overlap highlighting, and understand *why* a specific query retrieves the wrong content. You can fix chunking problems by looking, not by reading logs.
-
----
+![rag-tui doctor finding defects in a corpus, then the same corpus after switching to markdown chunking](assets/doctor-demo.gif)
 
 ## Install
 
@@ -43,386 +18,343 @@ The visual layer is the other differentiator. Every other tool is either a Pytho
 pip install rag-tui
 ```
 
-Python 3.10 or higher required.
-
----
-
-## Quick start
+Python 3.10 or newer. That is the whole setup. No model to download, no server to start, no API key.
 
 ```bash
-# Launch the interactive TUI
-rag-tui
-
-# Press L to load a sample document and start exploring immediately
+rag-tui doctor --file your-docs.md
 ```
 
-If you want to use local embeddings with no API keys, install Ollama and run `ollama serve`. RAG-TUI will detect it automatically.
+That command works on a laptop in airplane mode, thirty seconds after the install finishes. Read on for why that is unusual, and for what it costs you.
 
----
+## Nobody has a golden query set
 
-## The TUI: seven tabs, one workflow
+Ragas, TruLens and DeepEval all open the same way: bring your labelled queries. It is a fair thing to ask for. It is also why most teams never evaluate their retrieval at all. Writing fifty representative questions with known-correct answers is a solid week of work, and that week competes against shipping features. It loses every time.
 
-The app shows a persistent status strip below the strategy bar at all times: current strategy, chunk size, overlap, provider, and chunk count. You always know what config is active without switching tabs.
-
-### Input tab
-
-Paste your document directly or load from a file. Supports `.txt`, `.md`, `.py`, `.js`, `.ts`, `.json`, `.yaml`, `.yml`, `.xml`, `.html`, `.css`, `.sql`, `.sh`, `.rst`, `.tex`, `.csv`, and `.pdf` out of the box.
-
-The Quick Clean button normalizes whitespace, removes page numbers, and strips horizontal rules before you start chunking. You can also write your own Python cleaner function and apply it here.
-
-### Chunks tab
-
-This is where the core debugging happens. You can see every chunk your document produces with live parameter controls:
-
-- Chunk size slider
-- Overlap percentage slider
-- Strategy selector (Token, Sentence, Paragraph, Recursive, Fixed Characters, Custom)
-
-Adjust any parameter and the chunks re-render immediately. Overlap text between adjacent chunks is highlighted so you can see exactly how much context is shared. Each chunk card shows its character count, token estimate, and position in the document.
-
-**Six chunking strategies:**
-
-| Strategy | Best for |
-|---|---|
-| Token | Precise token-budget control, models with hard token limits |
-| Sentence | Natural language documents, QA systems |
-| Paragraph | Articles, documentation, structured prose |
-| Recursive | Code, mixed content, nested structure |
-| Fixed Characters | Byte-level control, preprocessing pipelines |
-| Custom | Your own Python function, any splitting logic you need |
-
-Keyboard shortcuts `1` through `5` switch strategies instantly.
-
-### Search tab
-
-Type any query and see which chunks get retrieved. Results show similarity scores, rank, and the matched text so you can understand what the vector store is actually doing.
-
-### Batch tab
-
-Paste a list of queries and run a full retrieval evaluation in one shot. Results display as color-coded metric bars, so you can read pipeline health at a glance rather than parsing numbers.
-
-**Five standard IR metrics:**
-
-- **Hit Rate**: the fraction of queries where at least one relevant chunk was retrieved
-- **MRR** (Mean Reciprocal Rank): how high the first relevant chunk ranks on average
-- **nDCG@k** (Normalized Discounted Cumulative Gain): a graded measure of ranking quality
-- **Recall@k**: how much relevant content is captured in the top k results
-- **Precision@k**: how much of the top k results is actually relevant
-
-**Two evaluation modes:**
-
-- **Run Batch Test**: fast similarity-based scoring (cosine threshold). No LLM calls, runs in seconds.
-- **Run with Judge**: LLM-as-judge mode. For each retrieved chunk, your local LLM scores its relevance to the query (0-1). MRR, nDCG, and Hit Rate are then computed from these scores instead of cosine similarity, which means the numbers actually reflect retrieval quality, not just vector distance. Also scores **faithfulness**: whether the retrieved chunks are sufficient to answer the query.
-
-The judge mode works with any provider including Ollama, so no cloud API is required. Metrics are labeled with their eval mode so you never confuse proxy metrics for real ones.
-
-**Baseline comparison**: save any run as your baseline, tune your config, run again, and get a metric-by-metric delta table. Each metric shows the direction change (▲/▼), absolute delta, and percentage change. Regressions are flagged in red immediately.
-
-### Optimize tab
-
-This is the killer feature. Give it a list of test queries, select which strategies and parameter ranges to sweep, and it runs every combination in parallel. The results come back ranked by a composite score: `0.35 * MRR + 0.35 * nDCG@k + 0.20 * Recall@k + 0.10 * Precision@k`. The top result is highlighted as the recommendation. You can apply any result to your current session with one click.
-
-Default sweep: 7 chunk sizes (64, 128, 200, 256, 320, 400, 512) x 4 overlaps (5%, 10%, 15%, 20%) x however many strategies you select. That's up to 140 configurations tested automatically with async concurrency control so it does not hammer your embedding provider.
-
-### Settings tab
-
-Presets for common use cases (QA retrieval, summarization, code search, long documents), custom chunker code editor, custom cleaner code editor, and export buttons for JSON, LangChain, and LlamaIndex formats.
-
-The custom code editor is sandboxed using RestrictedPython. Dunder escapes, file I/O, `__import__`, and dangerous builtins are blocked at the AST level.
-
-### Chat tab
-
-Chat with your document using the indexed chunks as retrieval context. Requires an LLM provider.
-
----
-
-## Embedding providers
-
-RAG-TUI auto-detects the best available provider at startup. You can also select one explicitly.
-
-| Provider | How to enable |
-|---|---|
-| Ollama (local) | Run `ollama serve` or set `OLLAMA_HOST` |
-| OpenAI | Set `OPENAI_API_KEY` |
-| Groq | Set `GROQ_API_KEY` |
-| Google Gemini | Set `GOOGLE_API_KEY` |
-
-All providers share a persistent SQLite embedding cache stored at `~/.rag-tui/cache/`. Re-embedding the same text twice is free.
-
----
-
-## Headless CLI
-
-For scripts, CI pipelines, and "just give me JSON".
-
-### Chunk a document
+`rag-tui doctor` does not ask for queries. It embeds your chunks once and then studies the shape of the space they landed in. Plenty of things that wreck retrieval leave a mark there before any query shows up.
 
 ```bash
-rag-tui chunk --file doc.txt --strategy sentence --chunk-size 256 --overlap-percent 10 --format json
+rag-tui doctor --file knowledge-base.md
+```
+
+```
+╭───────────────────────────── rag-tui doctor ─────────────────────────────╮
+│ Retrievability  86/100  (B)                                              │
+│ 17 chunks · paragraph · size 25 · overlap 10% · hubness skew -0.22       │
+│ embeddings: Ollama (Local)                                               │
+╰──────────────────────────────────────────────────────────────────────────╯
+
+▲ DUPLICATE  4 near-duplicate chunks (#1, #6, #11, #16)
+   Peak similarity 1.000. "Copyright Acme Corp. All rights reserved…"
+   → Deduplicate before indexing. If the repetition comes from overlap,
+     lower --overlap-percent; if it is in the source, strip it in cleaning.
+
+• BOILERPLATE  5 chunks too short to be retrievable (#0, #2, #7, #9, #12)
+   Under 80 characters. #0 "# Acme Cloud Knowledge Base"; #2 "## Billing…"
+   → This usually means a heading level is being split into its own chunk.
+
+• ORPHAN  Chunk #12 is unreachable from any neighbourhood
+   "## Data residency". Never appears in another chunk's neighbourhood.
+   → Low reachability. Verify a representative query actually retrieves it.
+```
+
+Four findings, each naming the chunk and what to do about it. No queries were involved.
+
+### The five checks
+
+**Hub.** A chunk that sits in far more top-k neighbourhoods than its share. Hubs come back for questions they have nothing to do with, and every slot a hub takes is a slot the right chunk does not get. This is the [hubness phenomenon](https://www.jmlr.org/papers/v11/radovanovic10a.html), a property of high-dimensional space that has been studied since 2010 and that no other RAG tool surfaces. In practice a hub is almost always a generic summary paragraph or a footer that got embedded along with everything else.
+
+**Orphan.** A chunk that appears in nobody's neighbourhood. There are two ways to end up here and they need opposite fixes, so the report tells you which one you have. Either a near-twin is beating it in every ranking they both enter (the report names the twin), or it is a content island with nothing semantically adjacent to it. The first is a dedup problem. The second might be your most valuable unique content, or it might be a mangled table.
+
+**Duplicate.** Near-identical chunks, grouped into clusters. Two copies of a fact do not double your chances of retrieving it. They split the ranking mass and take two slots in a top-3, which means one query can spend its entire context budget restating a single sentence.
+
+**Fracture.** A chunk boundary that cuts a sentence in half. The claim ends up split across two chunks and neither half answers the question. The check only fires when the first chunk ends without terminal punctuation *and* the next one starts lowercase, so headings and bullet lists do not trip it.
+
+**Boilerplate.** Chunks too short or too repetitive to mean anything. Nav bars, page numbers, stray headings. They flatten toward the corpus average and crowd out real content.
+
+All of it comes out of a single similarity matrix over your chunk embeddings, so the cost is one embedding pass and some numpy. Embeddings are cached on disk, so the second run after a config change is nearly free.
+
+### Putting it in CI
+
+The report ends in a score out of 100, and `--fail-under` turns that score into a build gate.
+
+```yaml
+# .github/workflows/rag-doctor.yml
+- name: Check corpus retrievability
+  run: |
+    pip install rag-tui
+    rag-tui doctor --file docs/knowledge-base.md --chunk-size 256 --fail-under 75
+```
+
+Now a pull request that pastes a duplicate section into the knowledge base fails the build, and it does so without anyone maintaining a golden query set. If you do have one, run `rag-tui eval` alongside it and get both.
+
+## Embeddings
+
+RAG-TUI picks the best embedder it can find at startup, in this order.
+
+| Provider | How to enable | Notes |
+|---|---|---|
+| Ollama | `ollama serve` or set `OLLAMA_HOST` | Local, free, semantic. The one to use |
+| OpenAI | `OPENAI_API_KEY` | Best quality, costs money, sends your text to OpenAI |
+| Google Gemini | `GOOGLE_API_KEY` | Free tier available |
+| Groq | `GROQ_API_KEY` | Text generation only, no embeddings |
+| Built-in | Nothing. It is always there | Lexical only. See below |
+
+### About the built-in one
+
+The fallback is roughly 150 lines of numpy: the hashing trick over word unigrams, bigrams and character 4-grams, with sublinear term frequency and L2 normalisation. There is no model file and no network call, which is why `pip install` is the entire setup.
+
+It is genuinely useful and genuinely limited, and the difference matters, so RAG-TUI says which one it used at the top of every report and warns you on stderr when it falls back.
+
+What it catches perfectly well: duplicate passages, boilerplate, stray headings, fractured sentences, structural damage of every kind. On the example corpus above it scores 88 where Ollama scores 86, and it flags the same defects.
+
+What it cannot see: paraphrase. "How do I get my money back" and "refund policy" share no vocabulary, so to a lexical embedder they are unrelated. If your queries reword things, and real user queries always do, start Ollama.
+
+Think of it as the smoke test you can always run, not the encoder you ship on.
+
+## The TUI
+
+`rag-tui` with no arguments opens the full interface. A status strip under the tab bar always shows the active strategy, size, overlap, provider and chunk count, so you never have to go looking for what is currently loaded.
+
+### Input
+
+![Input tab](assets/input-tab.png)
+
+Paste text or load a file. Handles `.txt`, `.md`, `.pdf`, `.py`, `.js`, `.ts`, `.json`, `.yaml`, `.xml`, `.html`, `.css`, `.sql`, `.sh`, `.rst`, `.tex` and `.csv`.
+
+Quick Clean normalises whitespace, strips page numbers and removes horizontal rules. You can also write your own cleaner in Python and run it here.
+
+### Chunks
+
+![Chunks tab, re-rendering live as you drag the size slider](assets/chunks-tab.png)
+
+This is where you actually debug. Chunk size and overlap are sliders, strategy is a dropdown, and the chunk list re-renders as you move them. Overlapping text between adjacent chunks is highlighted so you can see exactly how much context is shared, and each card shows its character count, token estimate and position.
+
+Seven strategies, and keys `1` through `7` switch between them instantly.
+
+| Strategy | Reach for it when |
+|---|---|
+| Token | Your model has a hard token ceiling you cannot cross |
+| Sentence | Prose and QA, where a split mid-sentence costs you the answer |
+| Paragraph | Articles and documentation with real paragraph structure |
+| Recursive | Code and mixed content with nested structure |
+| Fixed characters | You need byte-level predictability in a preprocessing step |
+| Markdown | Docs and wikis. Splits on headings and keeps the heading trail |
+| Hierarchical | Small chunks to match on, larger parent windows to answer from |
+| Custom | Your own Python function, sandboxed |
+
+### Search
+
+![Search tab](assets/search-tab.png)
+
+Type a query, see what comes back and at what score. This is the fastest way to answer "why on earth did it return that."
+
+### Batch
+
+Paste a list of queries and get the full IR suite back as colour-coded bars: hit rate, MRR, nDCG@k, recall@k and precision@k.
+
+Two modes. **Run Batch Test** scores by cosine threshold, takes seconds, and is a proxy. **Run with Judge** has your local LLM score each retrieved chunk for relevance from 0 to 1, then computes the metrics from those scores instead of from vector distance. Judge mode also reports faithfulness, meaning whether the retrieved chunks are actually sufficient to answer. Results are labelled with which mode produced them so you never mistake a proxy for the real thing.
+
+Save any run as a baseline, change your config, run again, and you get a metric-by-metric delta table with regressions in red.
+
+### Optimize
+
+Give it queries, pick which strategies and ranges to sweep, and it runs every combination concurrently and ranks them by `0.35·MRR + 0.35·nDCG@k + 0.20·Recall@k + 0.10·Precision@k`.
+
+The default sweep is 7 sizes by 4 overlaps by however many strategies you tick, so up to 140 configurations. Concurrency is capped so you do not hammer your embedding provider. Apply any result to the session with one click.
+
+### Settings and Chat
+
+Presets for common jobs (QA, summarisation, code search, long documents), the custom chunker and cleaner editors, and export to JSON, LangChain or LlamaIndex.
+
+Custom code runs under a RestrictedPython AST sandbox. Dunder escapes, file I/O, `__import__` and the dangerous builtins are blocked before evaluation.
+
+![Chat tab](assets/chat-tab.png)
+
+Chat queries your document through the indexed chunks. Needs a real LLM, so Ollama or an API key.
+
+## Command line
+
+Everything the TUI does, minus the pictures, for scripts and CI.
+
+```bash
+# Diagnose. No queries needed
+rag-tui doctor --file doc.md
+rag-tui doctor --file doc.md --format json
+rag-tui doctor --file doc.md --fail-under 70
+rag-tui doctor --file doc.md --strategy sentence --chunk-size 256 --neighbors 10
+
+# Chunk
+rag-tui chunk --file doc.txt --strategy sentence --chunk-size 256 --format json
 rag-tui chunk --file doc.txt --format csv
-```
 
-Output includes every chunk with its start/end positions, plus aggregate stats.
-
-### Evaluate retrieval quality
-
-```bash
-# Queries from a file
-rag-tui eval --file doc.txt --queries-file queries.txt --chunk-size 200 --top-k 3
-
-# LLM-as-judge mode: real relevance scores, no cosine proxy
+# Evaluate
+rag-tui eval --file doc.txt --queries-file queries.txt --top-k 3
 rag-tui eval --file doc.txt --queries-file queries.txt --use-judge
+rag-tui eval --file doc.txt --dataset-file queries.csv --save-baseline v1.json
 
-# Queries from a CSV/JSONL dataset
-rag-tui eval --file doc.txt --dataset-file queries.csv --strategy sentence
-
-# Save as a baseline for later comparison
-rag-tui eval --file doc.txt --queries-file queries.txt --save-baseline baseline.json
-```
-
-With `--use-judge`, each retrieved chunk is scored by your local LLM for relevance. All five IR metrics are computed from these scores, not cosine similarity. The output includes per-query faithfulness scores and labels the eval mode so you can tell proxy metrics from real ones at a glance.
-
-### Auto-optimize chunk configuration
-
-```bash
-# Sweep all default sizes and overlaps
+# Sweep
 rag-tui optimize --file doc.txt --queries-file queries.txt
-
-# Narrow the search space
 rag-tui optimize --file doc.txt --queries-file queries.txt \
-  --strategies token,sentence \
-  --sizes 128,200,256,320 \
-  --overlaps 5,10,15
+  --strategies token,sentence --sizes 128,200,256,320 --overlaps 5,10,15
 
-# Use a specific provider
-rag-tui optimize --file doc.txt --queries-file queries.txt --provider openai
-```
-
-### Compare two runs
-
-```bash
-# Generate a baseline
-rag-tui eval --file doc.txt --queries-file queries.txt --chunk-size 200 --save-baseline v1.json
-
-# Run with new config
-rag-tui eval --file doc.txt --queries-file queries.txt --chunk-size 300 > v2.json
-
-# Compare them
+# Compare and export
 rag-tui compare --baseline v1.json --current v2.json
+rag-tui export --strategy recursive --chunk-size 600 --format langchain
 ```
 
-### Export a config
+`--neighbors` sets the neighbourhood size k for hub and orphan detection. Raise it on large corpora where top-5 is not representative of how you actually retrieve.
+
+Every command exits non-zero on failure, so `set -e` behaves the way you expect.
+
+## MCP server
+
+Point Claude Code, Claude Desktop, or Cursor at RAG-TUI and an agent can tune a chunking
+pipeline directly, in the same session where it is writing the retrieval code.
 
 ```bash
-rag-tui export --strategy recursive --chunk-size 600 --overlap-percent 15 --format langchain
-rag-tui export --strategy sentence --chunk-size 256 --format llamaindex
+pip install "rag-tui[mcp]"
 ```
 
----
+The extra is separate from the base install on purpose. It pulls in a real dependency tree
+(starlette, uvicorn, pydantic) that most people never touch, and pulling that in for everyone
+would work against the entire point of this project, which is that the base install has
+nothing to set up.
+
+Add it to a client's config:
+
+```json
+{
+  "mcpServers": {
+    "rag-tui": { "command": "rag-tui", "args": ["mcp"] }
+  }
+}
+```
+
+Six tools, matching the CLI one for one:
+
+| Tool | What it does |
+|---|---|
+| `diagnose_corpus` | Structural defects, no query set. The one to reach for first |
+| `chunk_document` | Split a document and inspect exactly what came out |
+| `evaluate_retrieval` | IR metrics against real queries |
+| `optimize_chunking` | Sweep configs, ranked |
+| `export_chunking_config` | LangChain or LlamaIndex code for a config worth keeping |
+| `list_strategies` | What each chunking strategy is for |
+
+Every tool takes `text` or `path`, never both, the same split as the CLI's `--text`/`--file`.
+Output is capped by default (`max_findings`, `max_chunks`, `max_results`, all overridable) so
+one call on a large corpus cannot flood the agent's context window, and every response says
+which embedder actually ran, so a lexical-fallback score is never mistaken for a semantic one.
 
 ## Python API
 
-Use RAG-TUI in notebooks, evaluation scripts, or CI pipelines.
-
-### Chunking
-
 ```python
-from rag_tui import api
+import rag_tui.api as rag
 
-result = api.chunk(
-    text="Your document text here.",
-    strategy="sentence",
-    chunk_size=256,
-    overlap_percent=10,
-)
+# Diagnose
+report = rag.doctor(open("doc.md").read(), strategy="sentence", chunk_size=256)
+print(report["retrievability_score"], report["grade"])
+for finding in report["findings"]:
+    print(finding["severity"], finding["kind"], finding["message"])
+    print("  fix:", finding["suggestion"])
 
-for chunk in result["chunks"]:
-    print(chunk["text"], chunk["start"], chunk["end"])
-```
+# Chunk
+result = rag.chunk(text, strategy="sentence", chunk_size=256, overlap_percent=10)
 
-### Retrieval evaluation
-
-```python
-metrics = api.eval(
-    queries=["What is RAG?", "How does chunking affect retrieval?"],
-    docs="Your document text here.",
-    strategy="token",
-    chunk_size=200,
-    overlap_percent=10,
-    top_k=3,
-)
-
+# Evaluate
+metrics = rag.eval(queries=["what is rag?"], docs=text, chunk_size=200, top_k=3)
 print(metrics["metrics"]["mrr"])
-print(metrics["metrics"]["ndcg_at_k"])
-print(metrics["metrics"]["hit_rate"])
+
+# Sweep
+best = rag.optimize(text, queries, strategies=["token", "sentence"])["ranked_results"][0]
+
+# Regression check
+comparison = rag.compare(rag.eval(queries, docs, chunk_size=200),
+                         rag.eval(queries, docs, chunk_size=300))
 ```
 
-### Dataset evaluation
+Everything that touches the network has an async twin: `doctor_async`, `eval_async`, `eval_dataset_async`, `optimize_async`.
 
-```python
-# Load queries from CSV or JSONL
-metrics = api.eval_dataset(
-    dataset_path="queries.csv",
-    docs="Your document text here.",
-    strategy="sentence",
-    chunk_size=256,
-)
+## Datasets
+
+`--dataset-file` and `eval_dataset` take CSV or JSONL. Only `query` is required.
+
+```csv
+query,relevant_chunk,answer
+What is RAG?,RAG is a technique...,
 ```
 
-### Automated optimization
-
-```python
-report = api.optimize(
-    text="Your document text here.",
-    queries=["What is RAG?", "How does chunking work?"],
-    strategies=["token", "sentence"],
-    sizes=[128, 200, 256, 320],
-    overlaps=[5, 10, 15],
-)
-
-best = report["ranked_results"][0]
-print(best["chunk_size"], best["strategy"], best["score"])
+```jsonl
+{"query": "What is RAG?", "relevant_chunk": "RAG is a technique..."}
 ```
 
-### Baseline comparison
+## Caching
 
-```python
-baseline = api.eval(queries, docs, chunk_size=200)
-current = api.eval(queries, docs, chunk_size=300)
+Every embedding lands in SQLite at `~/.rag-tui/cache/`, keyed by the SHA-256 of the text plus the provider and model name, so switching providers invalidates correctly rather than silently mixing vector spaces.
 
-comparison = api.compare(baseline, current)
-print(comparison["overall_improved"])
-for delta in comparison["deltas"]:
-    print(delta["metric"], delta["delta"], delta["direction"])
-```
-
-### Async versions
-
-Every function has an async counterpart: `eval_async`, `eval_dataset_async`, `optimize_async`.
-
-```python
-import asyncio
-from rag_tui import api
-
-async def main():
-    metrics = await api.eval_async(queries, docs, chunk_size=256)
-    report = await api.optimize_async(text, queries)
-
-asyncio.run(main())
-```
-
-### Config export
-
-```python
-langchain_code = api.export(format="langchain", strategy="recursive", chunk_size=600)
-llamaindex_code = api.export(format="llamaindex", strategy="sentence", chunk_size=256)
-```
-
----
-
-## Embedding cache
-
-Every embedding result is cached in a local SQLite database at `~/.rag-tui/cache/`. The cache key is the SHA-256 hash of the input text plus the provider and model name, so changing providers invalidates the cache correctly.
-
-This makes repeated evaluations during tuning sessions fast. The optimizer benefit is especially large: a 140-config sweep where half the text chunks overlap across configurations can save 30-50% of embedding API calls.
-
----
+This matters most during a sweep. A 140-configuration run where half the chunks repeat across configs saves 30 to 50 percent of the embedding calls.
 
 ## Docker
 
 ```bash
-# Build and start with Ollama sidecar
 docker-compose up
-
-# Set a remote Ollama instance
 OLLAMA_HOST=http://your-server:11434 docker-compose up
 ```
 
-The `OLLAMA_HOST` environment variable is respected everywhere: TUI, CLI, and API.
+`OLLAMA_HOST` is respected everywhere: TUI, CLI and API.
 
----
+## What this does not do
 
-## Dataset format
+Worth knowing before you file an issue.
 
-The `--dataset-file` flag and `eval_dataset` API accept CSV and JSONL.
+The doctor finds structural problems, not factual ones. It can tell you a chunk is unreachable, duplicated or cut in half. It cannot tell you the chunk is wrong, out of date, or contradicts the chunk next to it.
 
-**CSV:**
-```csv
-query,relevant_chunk,answer
-What is RAG?,RAG is a technique...,
-How does chunking work?,Chunking splits...,
-```
+Findings are risk signals read off the geometry, not proofs. A chunk flagged as an isolated island might be exactly the unique content you care most about. Read them, do not just gate on them.
 
-**JSONL:**
-```jsonl
-{"query": "What is RAG?", "relevant_chunk": "RAG is a technique..."}
-{"query": "How does chunking work?"}
-```
+There is no reranker support, so what you are measuring is first-stage retrieval only.
 
-The `query` column is required. `relevant_chunk` and `answer` are optional.
+There is no semantic chunking, meaning splits placed where the embedding drifts rather than where the punctuation falls. Markdown and hierarchical cover the structural cases; semantic splitting is the next one.
 
----
+The built-in embedder is lexical, as covered above. It will not see paraphrase and it is not pretending to.
 
-## CI integration example
+## How it compares
 
-```yaml
-# .github/workflows/rag-eval.yml
-- name: Evaluate RAG chunking
-  run: |
-    pip install rag-tui
-    rag-tui eval \
-      --file docs/knowledge-base.txt \
-      --dataset-file tests/eval-queries.csv \
-      --strategy sentence \
-      --chunk-size 256 \
-      --save-baseline baseline.json
-    rag-tui compare --baseline baseline-main.json --current baseline.json
-```
+| | RAG-TUI | Ragas | TruLens | DeepEval |
+|---|---|---|---|---|
+| Works with no query set | Yes | No | No | No |
+| Runs with zero setup | Yes | No | No | No |
+| Fully offline, including the judge | Yes | No | No | No |
+| Visual chunking debugger | Yes | No | No | No |
+| Automatic config sweep | Yes | No | No | No |
+| CI-ready CLI | Yes | Partial | Partial | Yes |
+| Breadth of metrics | Focused on retrieval | Broad | Broad | Broadest |
 
----
-
-## Common workflows
-
-**Debug a failing query in 5 minutes:**
-1. Load your document in the Input tab
-2. Switch to Search, type the query that's failing
-3. See which chunks are being retrieved and their scores
-4. Go to Chunks, adjust size and strategy until the right content appears
-5. Run a batch test to verify you didn't break other queries
-
-**Find the optimal config for a new document type:**
-1. Prepare 10-20 representative queries in a text file
-2. Run `rag-tui optimize --file doc.txt --queries-file queries.txt`
-3. Check the ranked results, apply the top config
-4. Export to LangChain or LlamaIndex
-
-**Catch regressions before deploying a config change:**
-1. Run eval on your current config, save as baseline
-2. Make your config change
-3. Run eval again
-4. Compare: the output tells you which metrics improved and which regressed
-
----
+That last row is the honest one. If you need agent tracing, multi-turn evaluation and fifty metric types, DeepEval is a better tool and this is not trying to replace it. RAG-TUI is for the part of the problem where you are staring at a chunk and wondering why the vector store hates it.
 
 ## Keyboard shortcuts
 
 | Key | Action |
 |---|---|
 | `L` | Load sample document |
-| `R` | Re-chunk current document |
-| `D` | Toggle dark/light theme |
-| `E` | Export current config |
-| `1-5` | Switch chunking strategy |
-| `F1` / `?` | Open help overlay |
+| `R` | Re-chunk |
+| `D` | Toggle theme |
+| `E` | Export config |
+| `1`-`5` | Switch strategy |
+| `F1` or `?` | Help |
 | `Q` | Quit |
 
----
+## Regenerating the demo
+
+The GIF at the top is scripted, not hand-recorded, so it stays honest as the output changes.
+
+```bash
+brew install vhs
+vhs assets/demo/doctor.tape
+```
 
 ## Contributing
 
-Open an issue or pull request. If you find a chunking strategy that works better for a specific document type and have the eval numbers to back it up, that is a welcome contribution.
-
----
+Issues and pull requests welcome. If you have found a chunking strategy that beats the defaults for a particular kind of document, bring the eval numbers and it will very likely get merged.
 
 ## License
 

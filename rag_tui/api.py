@@ -7,6 +7,8 @@ Public surface:
     eval_dataset()  - eval() but takes a CSV/JSONL dataset file
     optimize()      - auto-recommend the best chunking config
     optimize_async()- async version of optimize()
+    doctor()        - query-free retrievability analysis of a corpus
+    doctor_async()  - async version of doctor()
     compare()       - compare a new run against a saved baseline
     export()        - export config for LangChain / LlamaIndex
 """
@@ -20,6 +22,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from rag_tui.core.doctor import DEFAULT_NEIGHBORS, analyze as _analyze_corpus
 from rag_tui.core.engine import ChunkingEngine
 from rag_tui.core.metrics import (
     BatchTestResult,
@@ -59,12 +62,16 @@ def chunk(
     engine = ChunkingEngine()
     overlap_tokens = max(0, int(round(chunk_size * (overlap_percent / 100.0))))
     strategy_type = StrategyType(strategy)
-    chunks = engine.chunk_text(
+    # chunk_detailed(), not chunk_text(): strategies like hierarchical put
+    # their whole point (the parent window a child came from) in metadata,
+    # and chunk_text() throws it away.
+    detailed = engine.chunk_detailed(
         text=text,
         chunk_size=chunk_size,
         overlap=overlap_tokens,
         strategy_type=strategy_type,
     )
+    chunks = [(r.text, r.start_pos, r.end_pos) for r in detailed]
     stats = engine.get_chunk_stats(chunks)
     return {
         "strategy": strategy_type.value,
@@ -73,8 +80,14 @@ def chunk(
         "overlap_tokens": overlap_tokens,
         "stats": stats,
         "chunks": [
-            {"index": i, "start": start, "end": end, "text": text_chunk}
-            for i, (text_chunk, start, end) in enumerate(chunks)
+            {
+                "index": i,
+                "start": r.start_pos,
+                "end": r.end_pos,
+                "text": r.text,
+                **({"metadata": r.metadata} if r.metadata else {}),
+            }
+            for i, r in enumerate(detailed)
         ],
     }
 
@@ -131,6 +144,7 @@ async def eval_async(
         ))
 
     batch = calculate_batch_metrics(query_results, threshold=threshold, top_k=top_k)
+    resolved_name = getattr(getattr(embedding_provider, "config", None), "name", provider)
     output = batch.to_dict()
     output["config"] = {
         "strategy": strategy_type.value,
@@ -139,7 +153,9 @@ async def eval_async(
         "overlap_tokens": overlap_tokens,
         "top_k": top_k,
         "threshold": threshold,
-        "provider": provider or "auto",
+        # The embedder that actually ran, not just the requested one, so a
+        # caller can tell semantic scores from the built-in lexical fallback.
+        "provider": resolved_name,
     }
     return output
 
@@ -280,7 +296,10 @@ async def optimize_async(
         max_concurrent=max_concurrent,
     )
     report = await optimizer.optimize(docs, queries, embedding_provider)
-    return report.to_dict()
+    resolved_name = getattr(getattr(embedding_provider, "config", None), "name", provider)
+    result = report.to_dict()
+    result["provider"] = resolved_name
+    return result
 
 
 def optimize(
@@ -309,6 +328,86 @@ def optimize(
         threshold=threshold,
         provider=provider,
         max_concurrent=max_concurrent,
+    ))
+
+
+# ---------------------------------------------------------------------------
+# doctor() / doctor_async() - query-free retrievability analysis
+# ---------------------------------------------------------------------------
+
+async def doctor_async(
+    docs: str,
+    strategy: str = "token",
+    chunk_size: int = 200,
+    overlap_percent: int = 10,
+    neighbors: int = DEFAULT_NEIGHBORS,
+    provider: Optional[str] = None,
+) -> Dict:
+    """Diagnose structural retrieval defects in a corpus, with no queries.
+
+    Chunks the document, embeds it once, and reads the geometry of the
+    resulting vector space to find hub chunks, unreachable chunks,
+    near-duplicates, sentence-splitting boundaries, and boilerplate.
+
+    Unlike eval(), this needs no labelled query set at all.
+
+    Example::
+
+        report = await rag.doctor_async(open("doc.txt").read(), chunk_size=256)
+        print(report["retrievability_score"], report["grade"])
+        for finding in report["findings"]:
+            print(finding["severity"], finding["message"])
+    """
+    engine = ChunkingEngine()
+    overlap_tokens = max(0, int(round(chunk_size * (overlap_percent / 100.0))))
+    strategy_type = StrategyType(strategy)
+
+    chunk_results = engine.chunk_text(
+        text=docs,
+        chunk_size=chunk_size,
+        overlap=overlap_tokens,
+        strategy_type=strategy_type,
+    )
+    chunks = [c[0] for c in chunk_results]
+    if not chunks:
+        raise ValueError("Document produced no chunks.")
+
+    embedding_provider = await _resolve_provider(provider)
+    embeddings = await embedding_provider.embed_batch(chunks)
+    resolved_name = getattr(getattr(embedding_provider, "config", None), "name", provider)
+
+    report = _analyze_corpus(
+        chunks,
+        np.array(embeddings),
+        strategy=strategy_type.value,
+        chunk_size=chunk_size,
+        overlap_percent=overlap_percent,
+        neighbors=neighbors,
+        provider=resolved_name,
+    )
+    return report.to_dict()
+
+
+def doctor(
+    docs: str,
+    strategy: str = "token",
+    chunk_size: int = 200,
+    overlap_percent: int = 10,
+    neighbors: int = DEFAULT_NEIGHBORS,
+    provider: Optional[str] = None,
+) -> Dict:
+    """Synchronous wrapper for doctor_async().
+
+    Returns a dict with ``retrievability_score``, ``grade`` and ``findings``.
+    """
+    _ensure_no_running_loop()
+    return asyncio.run(doctor_async(
+        docs=docs,
+        strategy=strategy,
+        chunk_size=chunk_size,
+        overlap_percent=overlap_percent,
+        neighbors=neighbors,
+        provider=provider,
     ))
 
 
@@ -444,6 +543,8 @@ __all__ = [
     "eval_dataset_async",
     "optimize",
     "optimize_async",
+    "doctor",
+    "doctor_async",
     "compare",
     "export",
 ]

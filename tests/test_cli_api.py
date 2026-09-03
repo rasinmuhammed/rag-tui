@@ -108,7 +108,7 @@ def test_cli_export_llamaindex():
 
 
 # ---------------------------------------------------------------------------
-# Python API — chunk
+# Python API: chunk
 # ---------------------------------------------------------------------------
 
 def test_api_chunk_token():
@@ -138,7 +138,7 @@ def test_api_chunk_stats_keys():
 
 
 # ---------------------------------------------------------------------------
-# Python API — export
+# Python API: export
 # ---------------------------------------------------------------------------
 
 def test_api_export_json():
@@ -161,7 +161,7 @@ def test_api_export_llamaindex():
 
 
 # ---------------------------------------------------------------------------
-# Python API — eval_dataset (no provider needed for loading)
+# Python API: eval_dataset (no provider needed for loading)
 # ---------------------------------------------------------------------------
 
 def test_api_load_dataset_csv(tmp_path):
@@ -183,7 +183,7 @@ def test_api_load_dataset_jsonl(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Python API — compare (no provider needed)
+# Python API: compare (no provider needed)
 # ---------------------------------------------------------------------------
 
 def test_api_compare(tmp_path):
@@ -242,7 +242,7 @@ def test_api_compare(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# CLI — compare subcommand
+# CLI: compare subcommand
 # ---------------------------------------------------------------------------
 
 def test_cli_compare(tmp_path):

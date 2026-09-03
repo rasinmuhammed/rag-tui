@@ -12,9 +12,13 @@ from dataclasses import dataclass
 from typing import List, Optional, AsyncIterator, Tuple
 from enum import Enum
 
+from rag_tui.core.local_embed import DEFAULT_DIM as LOCAL_EMBEDDING_DIM
+from rag_tui.core.local_embed import HashingEmbedder
+
 
 class ProviderType(Enum):
     """Available LLM providers."""
+    LOCAL = "local"
     OLLAMA = "ollama"
     OPENAI = "openai"
     GROQ = "groq"
@@ -36,6 +40,15 @@ class ProviderConfig:
 
 # Default configurations for each provider
 PROVIDER_CONFIGS = {
+    ProviderType.LOCAL: ProviderConfig(
+        name="Built-in (no setup)",
+        embedding_model="hashing-v1",
+        llm_model="",
+        embedding_dim=LOCAL_EMBEDDING_DIM,
+        base_url="",
+        supports_embedding=True,
+        supports_llm=False,
+    ),
     ProviderType.OLLAMA: ProviderConfig(
         name="Ollama (Local)",
         embedding_model="nomic-embed-text",
@@ -460,12 +473,57 @@ class GoogleProvider(LLMProvider):
             await asyncio.sleep(0.02)
 
 
+class LocalProvider(LLMProvider):
+    """Embeddings with nothing to install and nothing to configure.
+
+    This is what answers when no other provider does. It never fails a
+    connection check, because there is no connection: the vectors are computed
+    in-process by :class:`~rag_tui.core.local_embed.HashingEmbedder`.
+
+    It deliberately has no text generation. Chat and LLM-judge mode need a real
+    model, and quietly substituting a bag-of-words for one would produce
+    numbers that look like relevance scores while meaning nothing.
+    """
+
+    def __init__(self, config: ProviderConfig):
+        self.config = config
+        self.embedder = HashingEmbedder(dim=config.embedding_dim)
+        # No cache: hashing a chunk is far cheaper than a SQLite round trip.
+
+    async def check_connection(self) -> bool:
+        """Always true. There is nothing that can be unreachable."""
+        return True
+
+    async def embed(self, text: str) -> List[float]:
+        return self.embedder.embed_one(text).tolist()
+
+    async def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        return [vec.tolist() for vec in self.embedder.embed_many(texts)]
+
+    async def generate(self, prompt: str) -> str:
+        raise NotImplementedError(
+            "The built-in provider does the embeddings only. Chat and "
+            "--use-judge need a language model: start Ollama (ollama serve) "
+            "or set OPENAI_API_KEY."
+        )
+
+    async def stream_generate(self, prompt: str) -> AsyncIterator[str]:
+        raise NotImplementedError(
+            "The built-in provider does the embeddings only. Chat and "
+            "--use-judge need a language model: start Ollama (ollama serve) "
+            "or set OPENAI_API_KEY."
+        )
+        yield  # pragma: no cover - unreachable, marks this an async generator
+
+
 # Provider factory
 def get_provider(provider_type: ProviderType) -> LLMProvider:
     """Get a provider instance by type."""
     config = PROVIDER_CONFIGS[provider_type]
     
-    if provider_type == ProviderType.OLLAMA:
+    if provider_type == ProviderType.LOCAL:
+        return LocalProvider(config)
+    elif provider_type == ProviderType.OLLAMA:
         return OllamaProvider(config)
     elif provider_type == ProviderType.OPENAI:
         return OpenAIProvider(config)
@@ -504,6 +562,7 @@ async def get_best_provider() -> Tuple[Optional[LLMProvider], Optional[LLMProvid
         ProviderType.OPENAI,  # Best quality
         ProviderType.GOOGLE,  # Free tier
         ProviderType.GROQ,    # Fast but no embeddings
+        ProviderType.LOCAL,   # Always works; lexical only, so it goes last
     ]
     
     for provider_type in priority:

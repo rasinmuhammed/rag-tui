@@ -26,6 +26,8 @@ _STRATEGY_CHOICES = [
     ("Paragraph", "paragraph"),
     ("Recursive", "recursive"),
     ("Fixed-chars", "fixed_chars"),
+    ("Markdown", "markdown"),
+    ("Hierarchical", "hierarchical"),
 ]
 
 

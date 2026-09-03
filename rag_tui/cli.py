@@ -5,6 +5,7 @@ Subcommands:
     ui          Launch the interactive TUI
     chunk       Chunk a file / stdin and print JSON or CSV
     eval        Batch retrieval evaluation (queries from file, text, or dataset)
+    doctor      Query-free retrievability analysis (no labelled queries needed)
     optimize    Auto-recommend the best chunking config
     compare     Compare a new eval result against a saved baseline
     export      Print LangChain / LlamaIndex boilerplate for a config
@@ -22,6 +23,9 @@ from typing import List, Optional
 
 import numpy as np
 
+from rag_tui import __version__
+from rag_tui.core.doctor import DEFAULT_NEIGHBORS, DoctorReport
+from rag_tui.core.doctor import analyze as analyze_corpus
 from rag_tui.core.engine import ChunkingEngine
 from rag_tui.core.file_handler import read_file
 from rag_tui.core.metrics import (
@@ -33,7 +37,12 @@ from rag_tui.core.metrics import (
     load_dataset,
 )
 from rag_tui.core.optimizer import ChunkOptimizer
-from rag_tui.core.providers import ProviderType, get_best_provider, get_provider
+from rag_tui.core.providers import (
+    LocalProvider,
+    ProviderType,
+    get_best_provider,
+    get_provider,
+)
 from rag_tui.core.strategies import StrategyType
 from rag_tui.core.vector import VectorStore
 
@@ -42,12 +51,19 @@ from rag_tui.core.vector import VectorStore
 # Helpers
 # ---------------------------------------------------------------------------
 
+# 'custom' needs a Python function, so it is TUI-only and not offered here.
+_SELECTABLE_STRATEGIES = [
+    s.value for s in StrategyType if s is not StrategyType.CUSTOM
+]
+_STRATEGY_HELP = f"Chunking strategy: {', '.join(_SELECTABLE_STRATEGIES)} (default: token)"
+
+
 def _parse_strategy(value: str) -> StrategyType:
     try:
         strategy = StrategyType(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"Unknown strategy '{value}'. Choices: {[s.value for s in StrategyType]}"
+            f"Unknown strategy '{value}'. Choices: {', '.join(_SELECTABLE_STRATEGIES)}"
         ) from exc
     if strategy == StrategyType.CUSTOM:
         raise argparse.ArgumentTypeError(
@@ -77,6 +93,16 @@ async def _resolve_embedding_provider(name: Optional[str]):
                 "No embedding provider available. "
                 "Run Ollama (ollama serve) or set OPENAI_API_KEY / GOOGLE_API_KEY."
             )
+        if isinstance(provider, LocalProvider):
+            # Say so plainly. Lexical scores read like semantic ones and the
+            # difference matters when you act on them.
+            print(
+                "No provider configured, so this run uses the built-in lexical "
+                "embedder. It catches duplicates and structural damage, but it "
+                "cannot see paraphrase. Start Ollama (ollama serve) or set "
+                "OPENAI_API_KEY for semantic embeddings.",
+                file=sys.stderr,
+            )
         return provider
     provider_type = ProviderType(name)
     provider = get_provider(provider_type)
@@ -103,12 +129,16 @@ async def _run_chunk(args: argparse.Namespace) -> int:
     text = _read_text(args.file, args.text)
     engine = ChunkingEngine()
     overlap = _overlap_tokens(args.chunk_size, args.overlap_percent)
-    chunks = engine.chunk_text(
+    # Chunk once, keeping metadata. Strategies like hierarchical carry their
+    # payload there (the parent window a child came from), so dropping it would
+    # make them unusable headlessly.
+    detailed = engine.chunk_detailed(
         text=text,
         chunk_size=args.chunk_size,
         overlap=overlap,
         strategy_type=args.strategy,
     )
+    chunks = [(r.text, r.start_pos, r.end_pos) for r in detailed]
     stats = engine.get_chunk_stats(chunks)
 
     if args.format == "json":
@@ -119,7 +149,13 @@ async def _run_chunk(args: argparse.Namespace) -> int:
             "overlap_tokens": overlap,
             "stats": stats,
             "chunks": [
-                {"index": i, "start": start, "end": end, "text": chunk}
+                {
+                    "index": i,
+                    "start": start,
+                    "end": end,
+                    "text": chunk,
+                    **({"metadata": detailed[i].metadata} if detailed[i].metadata else {}),
+                }
                 for i, (chunk, start, end) in enumerate(chunks)
             ],
         })
@@ -191,6 +227,7 @@ async def _build_eval_output(
         ))
 
     batch = calculate_batch_metrics(query_results, threshold=threshold, top_k=top_k)
+    resolved_name = getattr(getattr(provider, "config", None), "name", provider_name)
     output = batch.to_dict()
     output["config"] = {
         "strategy": strategy.value,
@@ -199,7 +236,8 @@ async def _build_eval_output(
         "overlap_tokens": overlap,
         "top_k": top_k,
         "threshold": threshold,
-        "provider": provider_name or "auto",
+        # The embedder that actually ran, not just the requested one.
+        "provider": resolved_name,
     }
     return output
 
@@ -241,6 +279,121 @@ async def _run_eval(args: argparse.Namespace) -> int:
         print(f"Baseline saved → {path}", file=sys.stderr)
 
     _emit_json(output)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+_SEVERITY_STYLE = {
+    "critical": ("red", "✖"),
+    "warning": ("yellow", "▲"),
+    "info": ("cyan", "•"),
+}
+
+_KIND_LABEL = {
+    "hub": "HUB",
+    "orphan": "ORPHAN",
+    "duplicate": "DUPLICATE",
+    "fracture": "FRACTURE",
+    "boilerplate": "BOILERPLATE",
+}
+
+
+def _render_doctor_report(report: DoctorReport, limit: int) -> None:
+    """Print a human-readable diagnostic report to stdout."""
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.text import Text
+
+    console = Console()
+
+    score = report.retrievability_score
+    score_color = "green" if score >= 80 else "yellow" if score >= 55 else "red"
+
+    header = Text()
+    header.append("Retrievability  ", style="bold")
+    header.append(f"{score:.0f}/100", style=f"bold {score_color}")
+    header.append(f"  ({report.grade})", style=score_color)
+    header.append(
+        f"\n{report.total_chunks} chunks · {report.strategy} · size {report.chunk_size} · "
+        f"overlap {report.overlap_percent}% · hubness skew {report.hubness_skew:.2f}"
+        f"\nembeddings: {report.provider or 'unknown'}",
+        style="dim",
+    )
+    console.print(Panel(header, border_style=score_color, title="rag-tui doctor"))
+
+    if not report.findings:
+        console.print("\n[green]No structural defects found.[/green] "
+                      "[dim]Nothing in this corpus looks unretrievable.[/dim]\n")
+        return
+
+    shown = report.findings[:limit]
+    for finding in shown:
+        color, glyph = _SEVERITY_STYLE.get(finding.severity, ("white", "•"))
+        label = _KIND_LABEL.get(finding.kind, finding.kind.upper())
+
+        console.print()
+        console.print(
+            f"[{color}]{glyph} {label}[/{color}]  {finding.message}",
+            highlight=False,
+        )
+        if finding.detail:
+            console.print(f"   [dim]{finding.detail}[/dim]", highlight=False)
+        if finding.suggestion:
+            console.print(f"   [green]→[/green] {finding.suggestion}", highlight=False)
+
+    hidden = len(report.findings) - len(shown)
+    if hidden > 0:
+        console.print(f"\n[dim]… {hidden} more findings (use --top to show more)[/dim]")
+
+    console.print(f"\n[bold]{report.summary()}[/bold]\n")
+
+
+async def _run_doctor(args: argparse.Namespace) -> int:
+    text = _read_text(args.file, None)
+
+    engine = ChunkingEngine()
+    overlap = _overlap_tokens(args.chunk_size, args.overlap_percent)
+    chunk_results = engine.chunk_text(
+        text=text,
+        chunk_size=args.chunk_size,
+        overlap=overlap,
+        strategy_type=args.strategy,
+    )
+    chunks = [c[0] for c in chunk_results]
+    if not chunks:
+        _die("Document produced no chunks.")
+
+    provider = await _resolve_embedding_provider(args.provider)
+    provider_name = getattr(getattr(provider, "config", None), "name", None)
+    print(f"Embedding {len(chunks)} chunks…", file=sys.stderr)
+    embeddings = await provider.embed_batch(chunks)
+
+    report = analyze_corpus(
+        chunks,
+        np.array(embeddings),
+        strategy=args.strategy.value,
+        chunk_size=args.chunk_size,
+        overlap_percent=args.overlap_percent,
+        neighbors=args.neighbors,
+        provider=provider_name,
+    )
+
+    if args.format == "json":
+        _emit_json(report.to_dict())
+    else:
+        _render_doctor_report(report, args.top)
+
+    if args.fail_under is not None and report.retrievability_score < args.fail_under:
+        print(
+            f"error: retrievability {report.retrievability_score:.0f} "
+            f"is below --fail-under {args.fail_under}",
+            file=sys.stderr,
+        )
+        return 1
+
     return 0
 
 
@@ -381,7 +534,10 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Examples:\n"
             "  rag-tui                                      # launch TUI\n"
+            "  rag-tui mcp                                  # run the MCP server\n"
             "  rag-tui chunk --file doc.txt --chunk-size 256\n"
+            "  rag-tui doctor --file doc.txt                # no queries needed\n"
+            "  rag-tui doctor --file doc.txt --fail-under 70 --format json\n"
             "  rag-tui eval --file doc.txt --queries-file q.txt --chunk-size 256\n"
             "  rag-tui eval --file doc.txt --dataset-file queries.csv --save-baseline bl.json\n"
             "  rag-tui optimize --file doc.txt --queries-file q.txt --strategies token,sentence\n"
@@ -389,16 +545,29 @@ def _build_parser() -> argparse.ArgumentParser:
             "  rag-tui export --format langchain --chunk-size 256\n"
         ),
     )
+    parser.add_argument(
+        "--version", action="version", version=f"rag-tui {__version__}",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     # ui
     subparsers.add_parser("ui", help="Launch the interactive TUI")
 
+    # mcp
+    subparsers.add_parser(
+        "mcp",
+        help="Run the MCP server for Claude Code, Claude Desktop, or Cursor "
+             "(needs: pip install 'rag-tui[mcp]')",
+    )
+
     # chunk
     cp = subparsers.add_parser("chunk", help="Chunk text and output JSON/CSV")
     cp.add_argument("--file", help="Path to input file")
     cp.add_argument("--text", help="Inline text input")
-    cp.add_argument("--strategy", type=_parse_strategy, default=StrategyType.TOKEN)
+    cp.add_argument(
+        "--strategy", type=_parse_strategy, default=StrategyType.TOKEN,
+        metavar="NAME", help=_STRATEGY_HELP,
+    )
     cp.add_argument("--chunk-size", type=int, default=200)
     cp.add_argument("--overlap-percent", type=int, default=10)
     cp.add_argument("--format", choices=["json", "csv"], default="json")
@@ -410,7 +579,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ep.add_argument("--queries-file", help="File with queries (one per line)")
     ep.add_argument("--queries-text", help="Inline queries (one per line)")
     ep.add_argument("--dataset-file", help="CSV/JSONL dataset with a 'query' column")
-    ep.add_argument("--strategy", type=_parse_strategy, default=StrategyType.TOKEN)
+    ep.add_argument(
+        "--strategy", type=_parse_strategy, default=StrategyType.TOKEN,
+        metavar="NAME", help=_STRATEGY_HELP,
+    )
     ep.add_argument("--chunk-size", type=int, default=200)
     ep.add_argument("--overlap-percent", type=int, default=10)
     ep.add_argument("--top-k", type=int, default=3)
@@ -428,6 +600,40 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Score retrieved chunks with LLM judge for real relevance metrics (requires LLM provider)",
     )
     ep.set_defaults(func=_run_eval)
+
+    # doctor
+    dp = subparsers.add_parser(
+        "doctor",
+        help="Diagnose retrieval defects with no queries required",
+    )
+    dp.add_argument("--file", required=True, help="Document file to analyse")
+    dp.add_argument(
+        "--strategy", type=_parse_strategy, default=StrategyType.TOKEN,
+        metavar="NAME", help=_STRATEGY_HELP,
+    )
+    dp.add_argument("--chunk-size", type=int, default=200)
+    dp.add_argument("--overlap-percent", type=int, default=10)
+    dp.add_argument(
+        "--neighbors", type=int, default=DEFAULT_NEIGHBORS,
+        help=f"Neighbourhood size k for hubness analysis (default: {DEFAULT_NEIGHBORS})",
+    )
+    dp.add_argument(
+        "--provider", choices=[p.value for p in ProviderType],
+        help="Embedding provider (default: auto-detect)",
+    )
+    dp.add_argument(
+        "--format", choices=["text", "json"], default="text",
+        help="Output format (default: text)",
+    )
+    dp.add_argument(
+        "--top", type=int, default=20,
+        help="Max findings to display in text mode (default: 20)",
+    )
+    dp.add_argument(
+        "--fail-under", type=float, metavar="SCORE",
+        help="Exit 1 if the retrievability score falls below SCORE (for CI)",
+    )
+    dp.set_defaults(func=_run_doctor)
 
     # optimize
     op = subparsers.add_parser("optimize", help="Auto-recommend the best chunking config")
@@ -464,7 +670,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # export
     xp = subparsers.add_parser("export", help="Export chunk config for frameworks")
-    xp.add_argument("--strategy", type=_parse_strategy, default=StrategyType.TOKEN)
+    xp.add_argument(
+        "--strategy", type=_parse_strategy, default=StrategyType.TOKEN,
+        metavar="NAME", help=_STRATEGY_HELP,
+    )
     xp.add_argument("--chunk-size", type=int, default=200)
     xp.add_argument("--overlap-percent", type=int, default=10)
     xp.add_argument("--format", choices=["json", "langchain", "llamaindex"], default="json")
@@ -482,6 +691,15 @@ def main() -> None:
         run_tui()
         return
 
+    if args.command == "mcp":
+        try:
+            from rag_tui.mcp_server import main as run_mcp
+        except ImportError as exc:
+            _die(str(exc))
+            return
+        run_mcp()
+        return
+
     if not hasattr(args, "func"):
         parser.print_help()
         return
@@ -489,11 +707,16 @@ def main() -> None:
     result = args.func(args)
     if asyncio.iscoroutine(result):
         try:
-            sys.exit(asyncio.run(result))
-        except (KeyboardInterrupt, SystemExit):
-            pass
+            code = asyncio.run(result)
+        except KeyboardInterrupt:
+            code = 130
+        except SystemExit as exc:
+            # _die() raised inside a coroutine surfaces here; keep its code
+            # rather than swallowing it, or CI reads failures as successes.
+            code = exc.code if isinstance(exc.code, int) else 1
         except Exception as exc:
             _die(str(exc))
+        sys.exit(code)
 
 
 if __name__ == "__main__":

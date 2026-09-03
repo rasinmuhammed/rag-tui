@@ -1,8 +1,8 @@
-"""RAG-TUI v0.1.0: Interactive Chunking Debugger.
+"""RAG-TUI: Interactive Chunking Debugger.
 
 A terminal UI for visualizing, debugging, tuning, and auto-optimizing
 RAG chunking pipelines. Features:
-  - Six chunking strategies with live parameter tuning
+  - Seven chunking strategies with live parameter tuning
   - Multi-provider embedding/LLM (Ollama, OpenAI, Groq, Google)
   - Semantic search with similarity visualization
   - Batch evaluation: MRR, nDCG@k, Recall@k, Precision@k, Hit Rate
@@ -29,6 +29,7 @@ from textual.widgets import (
     Select, Static, TabbedContent, TabPane, TextArea,
 )
 
+from rag_tui import __version__
 from rag_tui.core.engine import ChunkingEngine, StrategyType
 from rag_tui.core.file_handler import format_file_size, read_file
 from rag_tui.core.metrics import (
@@ -62,14 +63,33 @@ STRATEGY_OPTIONS = [
     ("Paragraph breaks", "paragraph"),
     ("Recursive splitting", "recursive"),
     ("Fixed characters", "fixed_chars"),
+    ("Markdown headings", "markdown"),
+    ("Hierarchical (parent/child)", "hierarchical"),
 ]
 
 
+# Preset files use a couple of short names that are not enum values.
+_STRATEGY_ALIASES = {"fixed": StrategyType.FIXED_CHARS, "md": StrategyType.MARKDOWN}
+
+
+def strategy_from_value(value) -> StrategyType:
+    """Resolve a dropdown value or preset name to a StrategyType.
+
+    Derived from the enum rather than a hand-kept dict, so adding a strategy
+    does not mean remembering to update three lookup tables.
+    """
+    key = str(value)
+    try:
+        return StrategyType(key)
+    except ValueError:
+        return _STRATEGY_ALIASES.get(key, StrategyType.TOKEN)
+
+
 class RAGTUIApp(App):
-    """RAG-TUI v0.1.0 — Interactive chunking debugger and optimizer."""
+    """RAG-TUI: interactive chunking debugger and optimizer."""
 
     CSS_PATH = Path(__file__).parent / "styles" / "app.tcss"
-    TITLE = "RAG-TUI v0.1.0"
+    TITLE = f"RAG-TUI v{__version__}"
     SUB_TITLE = "Interactive Chunking Debugger"
 
     BINDINGS = [
@@ -85,6 +105,8 @@ class RAGTUIApp(App):
         Binding("3", "strategy_paragraph", "Paragraph", show=False),
         Binding("4", "strategy_recursive", "Recursive", show=False),
         Binding("5", "strategy_fixed", "Fixed", show=False),
+        Binding("6", "strategy_markdown", "Markdown", show=False),
+        Binding("7", "strategy_hierarchical", "Hierarchical", show=False),
     ]
 
     def __init__(self):
@@ -126,7 +148,7 @@ class RAGTUIApp(App):
         yield Static("", id="status-strip", markup=True)
 
         with TabbedContent(id="main-tabs"):
-            # 1 — Input
+            # 1. Input
             with TabPane("Input", id="input-tab"):
                 yield Static("Paste or load your document:", classes="tab-intro")
                 yield TextArea(id="text-input", language="markdown")
@@ -135,7 +157,7 @@ class RAGTUIApp(App):
                     yield Button("Quick Clean", id="quick-clean-btn", variant="primary")
                     yield Button("Clear", id="clear-btn", variant="warning")
 
-            # 2 — Chunks
+            # 2. Chunks
             with TabPane("Chunks", id="chunks-tab"):
                 yield ParameterPanel(
                     chunk_size=self._chunk_size,
@@ -145,11 +167,11 @@ class RAGTUIApp(App):
                 yield Static("", id="chunk-summary", classes="tab-intro")
                 yield ChunkList(id="chunk-list")
 
-            # 3 — Search
+            # 3. Search
             with TabPane("Search", id="search-tab"):
                 yield SearchPanel(id="search-panel")
 
-            # 4 — Batch
+            # 4. Batch
             with TabPane("Batch", id="batch-tab"):
                 with VerticalScroll():
                     yield Static("Enter multiple queries (one per line):", classes="tab-intro")
@@ -168,11 +190,11 @@ class RAGTUIApp(App):
                     yield Static("", id="batch-results", classes="batch-results")
                     yield Static("", id="baseline-comparison", classes="batch-results")
 
-            # 5 — Optimize  (killer feature)
+            # 5. Optimize
             with TabPane("Optimize", id="optimize-tab"):
                 yield OptimizePanel(id="optimize-panel")
 
-            # 6 — Settings & Export
+            # 6. Settings and Export
             with TabPane("Settings", id="settings-tab"):
                 with VerticalScroll():
                     yield Static("Recommendations", classes="section-title")
@@ -203,7 +225,7 @@ class RAGTUIApp(App):
                     yield TextArea(id="custom-cleaner-code", language="python")
                     yield Button("Apply Custom Cleaner", id="apply-cleaner-btn", variant="primary")
 
-            # 7 — Chat
+            # 7. Chat
             with TabPane("Chat", id="chat-tab"):
                 yield RichLog(id="chat-log", markup=True, wrap=True)
                 yield Static("", id="chat-live-response", classes="live-response")
@@ -227,7 +249,7 @@ class RAGTUIApp(App):
             )
         else:
             self.notify(
-                "No embedding provider — Search & Optimize disabled. "
+                "No embedding provider. Search and Optimize disabled. "
                 "Run Ollama or set OPENAI_API_KEY.",
                 severity="warning", timeout=8,
             )
@@ -240,7 +262,7 @@ class RAGTUIApp(App):
             self.sub_title = f"Provider: {self.llm_provider.config.name}"
         else:
             self.notify(
-                "No LLM provider — Chat disabled. Chunking & Export still work.",
+                "No LLM provider. Chat disabled. Chunking and export still work.",
                 severity="warning", timeout=8,
             )
             self.sub_title = "View-Only Mode (no provider)"
@@ -273,19 +295,12 @@ class RAGTUIApp(App):
             pass
 
     # ------------------------------------------------------------------
-    # Event handlers — top-level widgets
+    # Event handlers: top-level widgets
     # ------------------------------------------------------------------
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "strategy-select":
-            strategy_map = {
-                "token": StrategyType.TOKEN,
-                "sentence": StrategyType.SENTENCE,
-                "paragraph": StrategyType.PARAGRAPH,
-                "recursive": StrategyType.RECURSIVE,
-                "fixed_chars": StrategyType.FIXED_CHARS,
-            }
-            self._current_strategy = strategy_map.get(str(event.value), StrategyType.TOKEN)
+            self._current_strategy = strategy_from_value(event.value)
             self.chunking_engine.set_strategy(self._current_strategy)
             self._update_status_strip()
             asyncio.create_task(self._rechunk())
@@ -374,14 +389,7 @@ class RAGTUIApp(App):
         """Apply the selected optimization result to current chunking params."""
         self._chunk_size = event.chunk_size
         self._overlap_percent = event.overlap_percent
-        strategy_map = {
-            "token": StrategyType.TOKEN,
-            "sentence": StrategyType.SENTENCE,
-            "paragraph": StrategyType.PARAGRAPH,
-            "recursive": StrategyType.RECURSIVE,
-            "fixed_chars": StrategyType.FIXED_CHARS,
-        }
-        self._current_strategy = strategy_map.get(event.strategy, StrategyType.TOKEN)
+        self._current_strategy = strategy_from_value(event.strategy)
         self.chunking_engine.set_strategy(self._current_strategy)
 
         try:
@@ -502,7 +510,7 @@ class RAGTUIApp(App):
     ) -> None:
         if not self.embedding_provider:
             self.notify(
-                "Embedding provider not available — Search disabled.",
+                "Embedding provider not available. Search disabled.",
                 severity="warning",
             )
             return
@@ -853,7 +861,7 @@ class RAGTUIApp(App):
             self.query_one("#export-preview", Static).update(f"```\n{output}\n```")
         except Exception:
             pass
-        self.notify(f"{format.upper()} config generated — copy from Settings tab", timeout=3)
+        self.notify(f"{format.upper()} config generated. Copy it from the Settings tab", timeout=3)
 
     # ------------------------------------------------------------------
     # Custom chunker / cleaner
@@ -963,17 +971,8 @@ class RAGTUIApp(App):
                 return
             self._chunk_size = preset.chunk_size
             self._overlap_percent = preset.overlap_percent
-            strategy_map = {
-                "token": StrategyType.TOKEN,
-                "sentence": StrategyType.SENTENCE,
-                "paragraph": StrategyType.PARAGRAPH,
-                "recursive": StrategyType.RECURSIVE,
-                "fixed": StrategyType.FIXED_CHARS,
-                "fixed_chars": StrategyType.FIXED_CHARS,
-            }
-            if preset.strategy in strategy_map:
-                self._current_strategy = strategy_map[preset.strategy]
-                self.chunking_engine.set_strategy(self._current_strategy)
+            self._current_strategy = strategy_from_value(preset.strategy)
+            self.chunking_engine.set_strategy(self._current_strategy)
             param_panel = self.query_one("#parameter-panel", ParameterPanel)
             param_panel.chunk_size = preset.chunk_size
             param_panel.overlap_percent = preset.overlap_percent
@@ -997,15 +996,15 @@ class RAGTUIApp(App):
                 return
             if token_estimate < 500:
                 rec_size, rec_overlap, exp_chunks, tip = (
-                    "100-150", "15-20%", "3-5", "Small document — use precise chunks"
+                    "100-150", "15-20%", "3-5", "Small document, use precise chunks"
                 )
             elif token_estimate < 2000:
                 rec_size, rec_overlap, exp_chunks, tip = (
-                    "200-300", "10-15%", "8-15", "Medium document — balanced approach"
+                    "200-300", "10-15%", "8-15", "Medium document, balanced approach"
                 )
             else:
                 rec_size, rec_overlap, exp_chunks, tip = (
-                    "300-500", "10-15%", "15+", "Large document — consider larger chunks"
+                    "300-500", "10-15%", "15+", "Large document, consider larger chunks"
                 )
             panel.update(
                 f"Text: {text_len:,} chars (~{token_estimate:,} tokens)\n\n"
@@ -1098,6 +1097,12 @@ class RAGTUIApp(App):
 
     def action_strategy_fixed(self) -> None:
         self._switch_strategy(StrategyType.FIXED_CHARS, "Fixed chars")
+
+    def action_strategy_markdown(self) -> None:
+        self._switch_strategy(StrategyType.MARKDOWN, "Markdown headings")
+
+    def action_strategy_hierarchical(self) -> None:
+        self._switch_strategy(StrategyType.HIERARCHICAL, "Hierarchical")
 
 
 def main():

@@ -17,6 +17,8 @@ class StrategyType(Enum):
     PARAGRAPH = "paragraph"
     RECURSIVE = "recursive"
     FIXED_CHARS = "fixed_chars"
+    MARKDOWN = "markdown"
+    HIERARCHICAL = "hierarchical"
     CUSTOM = "custom"
 
 
@@ -302,6 +304,229 @@ class FixedCharsStrategy(ChunkingStrategy):
         return results
 
 
+class MarkdownStrategy(ChunkingStrategy):
+    """Split on markdown headings and keep the heading trail on every chunk.
+
+    Splitting a structured document on size alone throws away the one piece of
+    context the author already gave you. A paragraph under "Billing > Refunds"
+    reads very differently from the same words under "Billing > Disputes", and
+    once the heading is gone neither the embedder nor the model can tell.
+
+    Every chunk here is prefixed with its heading trail, so a chunk carries
+    where it came from. Headings are never emitted alone: a bare "## Rate
+    limits" is a useless chunk that no query retrieves, so it is attached to
+    the section body underneath it.
+
+    Only ATX headings (the ``#`` kind) are recognised. Fenced code blocks are
+    skipped, so a Python comment does not get mistaken for an ``<h1>``.
+    """
+
+    name = "markdown"
+    description = "Split on headings, keep the heading trail (best for docs and wikis)"
+
+    HEADING = re.compile(r'^(#{1,6})\s+(.*?)\s*#*\s*$')
+    FENCE = re.compile(r'^\s*(```|~~~)')
+
+    def chunk(self, text: str, chunk_size: int, overlap: int) -> List[ChunkResult]:
+        target = chunk_size * 4
+        sections = self._split_sections(text)
+
+        results: List[ChunkResult] = []
+        for path, body, body_start in sections:
+            if not body.strip():
+                continue
+            crumb = " > ".join(path)
+            for piece, start, end in self._split_body(body, body_start, target, overlap * 4):
+                chunk_text = f"{crumb}\n\n{piece}" if crumb else piece
+                results.append(ChunkResult(
+                    text=chunk_text,
+                    start_pos=start,
+                    end_pos=end,
+                    metadata={
+                        "heading_path": list(path),
+                        "heading_depth": len(path),
+                        # The prefix is context, not source text. Anything that
+                        # maps a chunk back to the file needs to skip it.
+                        "prefix_chars": len(chunk_text) - len(piece),
+                    },
+                ))
+
+        # A document with no headings at all still has to produce something.
+        if not results and text.strip():
+            return ParagraphStrategy().chunk(text, chunk_size, overlap)
+
+        return results
+
+    def _split_sections(self, text: str):
+        """Yield (heading_path, body_text, body_start_offset) per section."""
+        sections = []
+        stack: List[str] = []
+        body_lines: List[str] = []
+        body_start = 0
+        offset = 0
+        in_fence = False
+
+        def flush():
+            if body_lines:
+                sections.append((tuple(stack), "".join(body_lines), body_start))
+
+        for line in text.splitlines(keepends=True):
+            if self.FENCE.match(line):
+                in_fence = not in_fence
+
+            match = None if in_fence else self.HEADING.match(line)
+            if match:
+                flush()
+                level = len(match.group(1))
+                title = match.group(2).strip()
+                del stack[level - 1:]
+                stack.append(title)
+                body_lines = []
+                body_start = offset + len(line)
+            else:
+                if not body_lines and not line.strip():
+                    # Skip blank lines so a body starts at real content.
+                    body_start = offset + len(line)
+                else:
+                    body_lines.append(line)
+            offset += len(line)
+
+        flush()
+        return sections
+
+    def _split_body(self, body: str, body_start: int, target: int, overlap_chars: int):
+        """Break one section into size-limited pieces at paragraph breaks."""
+        if len(body.strip()) <= target:
+            stripped = body.strip()
+            lead = len(body) - len(body.lstrip())
+            yield stripped, body_start + lead, body_start + lead + len(stripped)
+            return
+
+        pos = 0
+        buffer: List[str] = []
+        buffer_start = 0
+        buffer_len = 0
+
+        for para in re.split(r'(\n\s*\n)', body):
+            if not para:
+                continue
+            if para.strip() == "":
+                if buffer:
+                    buffer.append(para)
+                pos += len(para)
+                continue
+
+            if buffer_len + len(para) > target and buffer:
+                piece = "".join(buffer).strip()
+                yield piece, body_start + buffer_start, body_start + buffer_start + len(piece)
+                keep = buffer[-1] if len(buffer[-1]) <= overlap_chars else ""
+                buffer = [keep] if keep else []
+                buffer_len = len(keep)
+                buffer_start = pos - len(keep)
+
+            if not buffer:
+                buffer_start = pos
+            buffer.append(para)
+            buffer_len += len(para)
+            pos += len(para)
+
+        if buffer:
+            piece = "".join(buffer).strip()
+            if piece:
+                yield piece, body_start + buffer_start, body_start + buffer_start + len(piece)
+
+
+class HierarchicalStrategy(ChunkingStrategy):
+    """Small chunks to find with, large chunks to answer from.
+
+    This is the pattern that resolves the oldest tradeoff in retrieval. Small
+    chunks match precisely because they are about one thing, and then hand the
+    model a fragment too narrow to reason over. Large chunks give the model
+    enough to work with and match badly because their embedding is an average
+    of six different topics.
+
+    So do both. The chunks returned here are small and are what you embed and
+    rank. Each one carries the larger passage it came from in
+    ``metadata["parent_text"]``, and that is what you put in the prompt once
+    the child has won the ranking.
+
+    ``chunk_size`` sizes the child. The parent is ``PARENT_MULTIPLIER`` times
+    larger.
+    """
+
+    name = "hierarchical"
+    description = "Small chunks for matching, parent windows for context"
+
+    PARENT_MULTIPLIER = 4
+    SENTENCE_ENDINGS = re.compile(r'(?<=[.!?])\s+')
+
+    def chunk(self, text: str, chunk_size: int, overlap: int) -> List[ChunkResult]:
+        child_target = chunk_size * 4
+        parent_target = child_target * self.PARENT_MULTIPLIER
+
+        results: List[ChunkResult] = []
+        for parent_index, (parent_text, parent_start) in enumerate(
+            self._windows(text, parent_target)
+        ):
+            children = list(self._windows(parent_text, child_target))
+            for child_text, child_offset in children:
+                start = parent_start + child_offset
+                results.append(ChunkResult(
+                    text=child_text,
+                    start_pos=start,
+                    end_pos=start + len(child_text),
+                    metadata={
+                        "parent_index": parent_index,
+                        "parent_start": parent_start,
+                        "parent_end": parent_start + len(parent_text),
+                        "parent_text": parent_text,
+                        "children_in_parent": len(children),
+                    },
+                ))
+
+        return results
+
+    def _windows(self, text: str, target: int):
+        """Split text into windows of about ``target`` chars on sentence breaks."""
+        if not text.strip():
+            return
+
+        sentences = [s for s in self.SENTENCE_ENDINGS.split(text) if s.strip()]
+        if not sentences:
+            return
+
+        buffer: List[str] = []
+        buffer_len = 0
+        cursor = 0
+        start = None
+
+        for sentence in sentences:
+            found = text.find(sentence, cursor)
+            if found == -1:
+                found = cursor
+            if start is None:
+                start = found
+
+            if buffer_len + len(sentence) > target and buffer:
+                window = text[start:cursor].strip()
+                if window:
+                    lead = len(text[start:cursor]) - len(text[start:cursor].lstrip())
+                    yield window, start + lead
+                start = found
+                buffer = []
+                buffer_len = 0
+
+            buffer.append(sentence)
+            buffer_len += len(sentence)
+            cursor = found + len(sentence)
+
+        if buffer and start is not None:
+            window = text[start:].strip()
+            if window:
+                lead = len(text[start:]) - len(text[start:].lstrip())
+                yield window, start + lead
+
+
 class CustomStrategy(ChunkingStrategy):
     """Custom user-defined chunking strategy."""
     
@@ -354,6 +579,8 @@ STRATEGIES = {
     StrategyType.PARAGRAPH: ParagraphStrategy,
     StrategyType.RECURSIVE: RecursiveStrategy,
     StrategyType.FIXED_CHARS: FixedCharsStrategy,
+    StrategyType.MARKDOWN: MarkdownStrategy,
+    StrategyType.HIERARCHICAL: HierarchicalStrategy,
     StrategyType.CUSTOM: CustomStrategy,
 }
 

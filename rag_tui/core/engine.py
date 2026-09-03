@@ -8,7 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple, Optional, Callable
 
 from rag_tui.core.strategies import (
-    StrategyType, 
+    StrategyType,
+    ChunkResult,
     ChunkingStrategy, 
     get_strategy,
     get_strategy_info
@@ -81,15 +82,40 @@ class ChunkingEngine:
         Returns:
             List of (text, start_pos, end_pos) tuples
         """
+        return [
+            (r.text, r.start_pos, r.end_pos)
+            for r in self.chunk_detailed(text, chunk_size, overlap, strategy_type)
+        ]
+
+    def chunk_detailed(
+        self,
+        text: str,
+        chunk_size: int = 200,
+        overlap: int = 20,
+        strategy_type: Optional[StrategyType] = None,
+    ) -> List["ChunkResult"]:
+        """Chunk text and keep each chunk's metadata.
+
+        Same work as chunk_text(), but nothing is thrown away. Strategies like
+        hierarchical put their whole point in metadata (the parent window a
+        child came from), so anything that needs it should call this.
+
+        Args:
+            text: The text to chunk
+            chunk_size: Target chunk size in tokens
+            overlap: Overlap amount in tokens
+            strategy_type: Strategy to use (defaults to current)
+
+        Returns:
+            List of ChunkResult objects
+        """
         if not text or not text.strip():
             return []
-        
+
         strategy_type = strategy_type or self._current_strategy_type
         strategy = self.get_strategy(strategy_type)
-        
-        results = strategy.chunk(text, chunk_size, overlap)
-        
-        return [(r.text, r.start_pos, r.end_pos) for r in results]
+
+        return strategy.chunk(text, chunk_size, overlap)
     
     async def chunk_text_async(
         self,
